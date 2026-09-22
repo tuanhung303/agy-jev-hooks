@@ -1,0 +1,22 @@
+#!/bin/bash
+# jevgrep launcher: repo checkout, key overlay, python entry.
+# Sources the local key env and maps it onto the provider variable names the
+# profiles expect, so MCP clients inherit credentials without storing them.
+set -euo pipefail
+
+REPO="/Users/__blitzzz/Documents/GitHub/agy-jev-hooks"
+
+if [ -f "$HOME/.config/agy/sage.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$HOME/.config/agy/sage.env"
+  set +a
+fi
+
+# The sage gateway key is a Vercel AI Gateway key under its own name.
+if [ -z "${AI_GATEWAY_API_KEY:-}" ] && [ -n "${AGY_JEV_API_KEY:-}" ]; then
+  export AI_GATEWAY_API_KEY="$AGY_JEV_API_KEY"
+fi
+
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m mcp.jev.grep "$@"

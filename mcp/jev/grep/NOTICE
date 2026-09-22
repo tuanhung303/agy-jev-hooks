@@ -1,0 +1,55 @@
+JevGrep Python port
+===================
+
+This module is a Python port of JevGrep by Nassim Arifette:
+  https://github.com/nassim-arifette/jevgrep (npm @nassim-arifette/jevgrep v0.1.0)
+
+Original work: Copyright (c) 2026 Nassim Arifette, MIT License.
+Port: see the repository containing this directory.
+
+MIT License applies to the original design, contracts and translated logic.
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Deliberate divergences from upstream v0.1.0
+-------------------------------------------
+- Response token counter: local UTF-8 byte estimator (utf8-bytes@1/ceil-4),
+  not tiktoken cl100k_base. Tracks cl100k closely on code/JSON; batch packing
+  still keeps 30% headroom. Counter id is reported in every result.
+- JS/TS syntax chunker dropped (upstream pins a TypeScript compiler). Line
+  windows are the only strategy; chunker id jevgrep-py-line-windows-1. Cache
+  identities therefore never collide with upstream entries.
+- Vercel AI Gateway adapter speaks the gateway evaluation-model HTTP contract
+  directly (spec header v4) instead of the upstream AI SDK wrapper.
+- Windows reparse-point attribute checks are simplified to lstat/realpath
+  containment. No junction-specific probing. Symlinked ancestors above the
+  authorized root are tolerated (macOS /tmp, /var); links inside the root stay
+  refused.
+- Trusted configuration file is YAML, parsed with sage.jev.yaml_lite. Field
+  names match the upstream configuration contract.
+- Score cache schema_version 3 with upstream identity inputs, but canonical
+  JSON encoding details differ: upstream and port caches do not interoperate
+  (they are separate directories anyway).
+- Response contract (schema_version "1") shape and validator invariants are
+  ported as-is.
+
+Unchanged by design: per-repository remote-evaluation opt-in, credential
+pattern quarantine, no-redirect bounded HTTP, strict answer validation
+(unavailable evaluation is never a zero score), deterministic batching and
+selection, freshness revalidation before rendering, one active + one queued
+MCP search then BUSY.

@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""
+tests.test_statusline - Unit tests for statusline formatting, context calculation, and quota rendering.
+"""
+import os
+import unittest
+from unittest.mock import patch
+
+from statusline.statusline import (
+    DEFAULT_EFFECTIVE_MAX_CTX,
+    PASTEL_CONTEXT_STAGES,
+    calculate_seconds_left,
+    clean_model_name,
+    format_countdown,
+    format_session_badge,
+    format_tokens,
+    get_context_color,
+    get_effective_max_context,
+    get_session_id,
+    get_short_session_id,
+    is_agent_active,
+    render_statusline,
+)
+
+
+class TestStatusline(unittest.TestCase):
+    def test_format_tokens(self):
+        self.assertEqual(format_tokens(0), "0")
+        self.assertEqual(format_tokens(500), "500")
+        self.assertEqual(format_tokens(1000), "1k")
+        self.assertEqual(format_tokens(1500), "2k")
+        self.assertEqual(format_tokens(250000), "250k")
+        self.assertEqual(format_tokens(1000000), "1M")
+        self.assertEqual(format_tokens(1500000), "2M")
+
+    def test_format_countdown(self):
+        self.assertEqual(format_countdown(0), "")
+        self.assertEqual(format_countdown(-10), "")
+        self.assertEqual(format_countdown(59), "[1m]")
+        self.assertEqual(format_countdown(120), "[2m]")
+        self.assertEqual(format_countdown(3660), "[2h]")
+        self.assertEqual(format_countdown(90000), "[2d]")
+
+    def test_calculate_seconds_left_fallback(self):
+        self.assertEqual(calculate_seconds_left(None, fallback_seconds=120), 120)
+        self.assertEqual(calculate_seconds_left("invalid-date", fallback_seconds=300), 300)
+
+    def test_clean_model_name(self):
+        self.assertEqual(clean_model_name(None), "agy")
+        self.assertEqual(clean_model_name("Gemini 3.7 Flash (High)"), "3.7 flash [h]")
+        self.assertEqual(clean_model_name("gemini-3.1-pro (Low)"), "3.1-pro [l]")
+        self.assertEqual(clean_model_name("Gemini 3.5 Flash (Medium)"), "3.5 flash [m]")
+        self.assertEqual(clean_model_name("gemini-3.7-flash-high"), "3.7-flash [h]")
+        self.assertEqual(clean_model_name("gemini-3.7-flash-medium"), "3.7-flash [m]")
+        self.assertEqual(clean_model_name("gemini-3.7-flash-low"), "3.7-flash [l]")
+
+    def test_is_agent_active(self):
+        self.assertTrue(is_agent_active({"state": "running"}))
+        self.assertTrue(is_agent_active({"status": "active"}))
+        self.assertTrue(is_agent_active({"alive": True}))
+        self.assertFalse(is_agent_active({"state": "completed"}))
+        self.assertFalse(is_agent_active({"status": "done"}))
+        self.assertFalse(is_agent_active({"exit_code": 1}))
+
+    def test_get_effective_max_context(self):
+        self.assertEqual(get_effective_max_context(), DEFAULT_EFFECTIVE_MAX_CTX)
+        self.assertEqual(get_effective_max_context(), 250_000)
+
+        with patch.dict(os.environ, {"AGY_MAX_CONTEXT_TOKENS": "400000"}):
+            self.assertEqual(get_effective_max_context(), 400_000)
+
+        with patch.dict(os.environ, {"AGY_MAX_CONTEXT_TOKENS": "invalid"}):
+            self.assertEqual(get_effective_max_context(), 250_000)
+
+    def test_get_context_color_smooth_stages(self):
+        # Anchor checks
+        self.assertEqual(get_context_color(0), "\033[1;38;2;137;180;250m")
+        self.assertEqual(get_context_color(30), "\033[1;38;2;148;226;213m")
+        self.assertEqual(get_context_color(50), "\033[1;38;2;166;227;161m")
+        self.assertEqual(get_context_color(70), "\033[1;38;2;249;226;175m")
+        self.assertEqual(get_context_color(85), "\033[1;38;2;250;179;135m")
+        self.assertEqual(get_context_color(92), "\033[1;38;2;243;139;168m")
+        self.assertEqual(get_context_color(100), "\033[1;38;2;243;139;168m")
+
+    def test_render_statusline_context_window_saturation_colors(self):
+        # 1. Critical context (88.4%): interpolated color between peach and rose
+        data_critical = {
+            "model": "Gemini 3.7 Flash (High)",
+            "context_window": {
+                "total_input_tokens": 210597,
+                "context_window_size": 1048576,
+                "current_usage": {
+                    "input_tokens": 4338,
+                    "cache_read_input_tokens": 204994,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 11340,
+                },
+            },
+            "quota": {
+                "gemini-5h": {
+                    "remaining_fraction": 0.75,
+                    "reset_in_seconds": 3600,
+                },
+            },
+            "terminal_width": 100,
+        }
+        output_crit = render_statusline(data_critical)
+        expected_color_crit = get_context_color(220672 / 250000 * 100)
+        self.assertNotIn("ctx:", output_crit)
+        self.assertNotIn("/250k", output_crit)
+        self.assertIn(f"{expected_color_crit}3.7 flash [h]\033[0m", output_crit)
+        self.assertIn("25%", output_crit)
+
+        # 2. Warning context (180k / 250k = 72%): interpolated near warm yellow
+        data_warn = {
+            "model": "Gemini 3.7 Flash (High)",
+            "context_window": {"total_input_tokens": 180000},
+            "terminal_width": 100,
+        }
+        output_warn = render_statusline(data_warn)
+        expected_color_warn = get_context_color(180000 / 250000 * 100)
+        self.assertIn(f"{expected_color_warn}3.7 flash [h]\033[0m", output_warn)
+
+        # 3. Normal context (50k / 250k = 20%): interpolated between sky blue and teal
+        data_normal = {
+            "model": "Gemini 3.7 Flash (High)",
+            "context_window": {"total_input_tokens": 50000},
+            "terminal_width": 100,
+        }
+        output_norm = render_statusline(data_normal)
+        expected_color_norm = get_context_color(50000 / 250000 * 100)
+        self.assertIn(f"{expected_color_norm}3.7 flash [h]\033[0m", output_norm)
+
+    def test_render_statusline_checkpoint_badge(self):
+        import re
+        data = {
+            "model": "Gemini 3.7 Flash (High)",
+            "checkpoint_count": 3,
+            "context_window": {"total_input_tokens": 50000},
+        }
+        output = render_statusline(data)
+        plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", output)
+        self.assertIn("3.7 flash [h][3]", plain)
+        self.assertNotIn("ctx:", plain)
+        self.assertNotIn("cp[3]", plain)
+
+    def test_render_statusline_fallback(self):
+        import re
+        from unittest.mock import patch
+        with patch("sage.config.LITE_MODE_ENABLED", False):
+            output = render_statusline({})
+            plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", output)
+            self.assertIn("0%", plain)
+            self.assertIn("sage:idle", plain)
+            self.assertNotIn("ctx:", plain)
+
+    def test_render_statusline_lite_mode_hides_sage_idle(self):
+        import re
+        from unittest.mock import patch
+        with patch("sage.config.LITE_MODE_ENABLED", True):
+            output = render_statusline({})
+            plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", output)
+            self.assertIn("0%", plain)
+            self.assertNotIn("sage:idle", plain)
+
+    @patch("sage.config.LITE_MODE_ENABLED", False)
+    def test_get_advisor_steer_badges_hold_and_fired(self):
+        import json
+        import re
+
+        from statusline.statusline import get_advisor_steer_badges, safe_id
+
+        conv_id = "test_conv_status_123"
+        state_file = f"/tmp/agy_sage_{safe_id(conv_id)}.json"
+
+        def clean(s):
+            return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", s)
+
+        try:
+            # 1. Idle/Hold state -> sage:idle (grey)
+            with open(state_file, "w") as f:
+                json.dump({
+                    "turn_key": "tk1",
+                    "mid_turn_steers": 0,
+                    "advisor_holds": 2,
+                    "recap_count": 1,
+                    "sage_status": "hold",
+                }, f)
+
+            badges = get_advisor_steer_badges({"conversation_id": conv_id})
+            self.assertEqual(len(badges), 1)
+            self.assertEqual(clean(badges[0]), "sage:idle")
+            self.assertEqual(badges[0], "\033[90msage:idle\033[0m")
+
+            # 2. Injecting/Fired state -> sage:inject (coral)
+            with open(state_file, "w") as f:
+                json.dump({
+                    "turn_key": "tk1",
+                    "session_mid_turn_steers": 2,
+                    "sage_status": "fired",
+                    "recap_emitted": False,
+                }, f)
+            badges = get_advisor_steer_badges({"conversation_id": conv_id})
+            self.assertEqual(len(badges), 1)
+            self.assertEqual(clean(badges[0]), "sage:inject")
+            self.assertEqual(badges[0], "\033[38;2;255;127;80msage:inject\033[0m")
+
+            # 3. Active Recap Injection -> sage:inject (coral)
+            with open(state_file, "w") as f:
+                json.dump({
+                    "turn_key": "tk1",
+                    "sage_status": "recap",
+                    "recap_emitted": False,
+                }, f)
+            badges = get_advisor_steer_badges({"conversation_id": conv_id})
+            self.assertEqual(len(badges), 1)
+            self.assertEqual(clean(badges[0]), "sage:inject")
+            self.assertEqual(badges[0], "\033[38;2;255;127;80msage:inject\033[0m")
+
+            # 4. Post-recap completed state -> sage:idle (grey)
+            with open(state_file, "w") as f:
+                json.dump({
+                    "turn_key": "tk1",
+                    "sage_status": "recap",
+                    "recap_emitted": True,
+                }, f)
+            badges = get_advisor_steer_badges({"conversation_id": conv_id})
+            self.assertEqual(len(badges), 1)
+            self.assertEqual(clean(badges[0]), "sage:idle")
+            self.assertEqual(badges[0], "\033[90msage:idle\033[0m")
+
+            # 5. Evaluating State -> sage:eval (bright blue) + error streak suffix
+            with open(state_file, "w") as f:
+                json.dump({
+                    "turn_key": "tk1",
+                    "sage_status": "evaluating",
+                    "sage_error_streak": 3,
+                }, f)
+            badges = get_advisor_steer_badges({"conversation_id": conv_id})
+            self.assertEqual(len(badges), 1)
+            self.assertIn("\033[1;34msage:eval\033[0m", badges[0])
+            self.assertIn("\033[31m/err[3]\033[0m", badges[0])
+            self.assertEqual(clean(badges[0]), "sage:eval/err[3]")
+        finally:
+            if os.path.exists(state_file):
+                os.remove(state_file)
+
+    def test_get_session_id_and_short_id(self):
+        # 1. Direct fields
+        self.assertEqual(get_session_id({"conversation_id": "d6a2ce6e-1234"}), "d6a2ce6e-1234")
+        self.assertEqual(get_session_id({"sessionId": "feed-beef-9999"}), "feed-beef-9999")
+        self.assertEqual(get_short_session_id({"conversation_id": "d6a2ce6e-1234"}, length=6), "d6a2ce")
+        self.assertEqual(get_short_session_id({"conversation_id": "d6a2ce6e-1234"}, length=4), "d6a2")
+        self.assertEqual(format_session_badge({"conversation_id": "d6a2ce6e-1234"}, length=6), "\033[90m#d6a2ce\033[0m")
+
+        # 2. Transcript path fallback
+        tp_data = {"transcript_path": "/Users/test/.gemini/antigravity-cli/brain/c47c5627-abcd/transcript.jsonl"}
+        self.assertEqual(get_short_session_id(tp_data, length=6), "c47c56")
+
+        # 3. Environment fallback
+        with patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": "8e8901cf-9999"}, clear=False):
+            self.assertEqual(get_short_session_id({}, length=6), "8e8901")
+
+        # 4. Empty returns empty string
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_short_session_id({}), "")
+            self.assertEqual(format_session_badge({}), "")
+
+    def test_render_statusline_session_id_right_aligned(self):
+        import re
+
+        data = {
+            "model": "Gemini 3.8 Flash (High)",
+            "terminal_width": 80,
+            "quota": {
+                "5h": {"remaining_fraction": 0.8, "reset_in_seconds": 3600}
+            },
+            "conversation_id": "d6a2ce6e-c530-4280-bce0-f3d1123ead71"
+        }
+        output = render_statusline(data)
+        plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", output)
+
+        # Session ID must be at the end of the line
+        self.assertTrue(plain.rstrip().endswith("#d6a2ce"))
+        self.assertIn("20%[1h]", plain)
+        self.assertIn("3.8 flash [h]", plain)
+
+
+if __name__ == "__main__":
+    unittest.main()

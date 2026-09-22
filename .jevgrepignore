@@ -1,0 +1,5 @@
+# Repository-local exclusions for JevGrep, narrowing only: a listed pattern can
+# only exclude further, never re-include a file excluded elsewhere.
+# Examples:
+# internal/proprietary/**
+# docs/private/**

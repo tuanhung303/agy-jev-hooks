@@ -1,0 +1,65 @@
+version: 1
+note: singleton light-skill pack; `file` is relative to this directory, `source`/`raw` repopulate content
+skills:
+  - id: tdd
+    file: tdd.md
+    origin: local
+    source: /Users/__blitzzz/Documents/GitHub/agentic/skills/tdd/SKILL.md
+    tier: light
+    inject: both
+    triggers:
+      - tdd
+      - test-driven
+      - test first
+      - failing test
+      - regression test
+      - fix the bug
+    description: Test-first bug fix workflow: failing test before the fix, smallest change, evidence in the report.
+  - id: teamplay
+    file: teamplay.md
+    origin: local
+    source: /Users/__blitzzz/Documents/GitHub/agentic/skills/teamplay/SKILL.md
+    tier: light
+    inject: prompt
+    triggers:
+      - teamplay
+      - orchestration
+      - delegate
+      - workstream
+      - assignments
+    description: Coordinate independent workstreams through one lead session: ownership, dependencies, verified integration.
+  - id: caveman
+    file: caveman.md
+    origin: community
+    source: https://github.com/JuliusBrussee/caveman/blob/main/skills/caveman/SKILL.md
+    raw: https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md
+    tier: light
+    inject: prompt
+    triggers:
+      - caveman
+      - caveman mode
+      - less fluff
+      - token saving
+    description: Token-saving speech mode. All technical substance stay. Only fluff die.
+  - id: boost
+    file: boost.md
+    origin: builtin
+    source: Antigravity CLI system context (built-in /boost slash command)
+    tier: light
+    inject: prompt
+    triggers:
+      - boost
+      - deep thinking mode
+    description: Antigravity built-in deep-work mode for complex coding or research needing deep thinking, strategic planning, multiple perspectives, and rigorous verification.
+  - id: grill-me
+    file: grill-me.md
+    origin: local
+    source: /Users/__blitzzz/.hermes/hermes-agent/optional-skills/software-development/grill-me/SKILL.md
+    tier: light
+    inject: prompt
+    triggers:
+      - grill-me
+      - grill me
+      - interview my plan
+      - stress test this idea
+    description: Adversarial plan interview using frontier-round questioning before any code is written; resolves every design decision and assumption through structured rounds.
