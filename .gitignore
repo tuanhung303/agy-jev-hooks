@@ -14,3 +14,4 @@ ORIGINAL_REQUEST.md
 htmlcov/
 .hermes/
 benchmark/pdd-adapt/runs/
+node_modules/
