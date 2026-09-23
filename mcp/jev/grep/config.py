@@ -305,11 +305,40 @@ def find_profile_for(cwd: Optional[str] = None, env: Optional[dict] = None) -> s
         if (target == root or target.startswith(root.rstrip(os.sep) + os.sep)) and len(root) > len(best_root):
             best_path, best_root = path, root
     if best_path is None:
+        if target == "/" or not target:
+            valid_profiles = []
+            for name in names:
+                path = os.path.join(directory, name)
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        parsed = safe_load(handle.read(1_048_576))
+                    root = os.path.realpath(parsed["repository_root"])
+                    if os.path.exists(root):
+                        valid_profiles.append((path, root))
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+            if len(valid_profiles) == 1:
+                return valid_profiles[0][0]
         raise ConfigurationError(
             "INVALID_CONFIG",
             f"no authorized JevGrep profile for {target}; authorize once with: "
             f"jevgrep init --root {target} --enable-remote --provider vercel-ai-gateway")
     return best_path
+
+
+def _read_env_file(path: str) -> dict:
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                values[key.strip()] = val.strip().strip("'\"")
+    except OSError:
+        pass
+    return values
 
 
 def resolve_credential(loaded: dict, env: Optional[dict] = None) -> str:
@@ -323,6 +352,18 @@ def resolve_credential(loaded: dict, env: Optional[dict] = None) -> str:
     name = config["provider"]["api_key_env"]
     secret = env.get(name)
     if not secret or not secret.strip():
+        home = os.path.expanduser("~")
+        for secrets_path in (
+            os.path.join(home, ".config", "jevgrep", "secrets.env"),
+            os.path.join(home, ".config", "agy", "sage.env"),
+        ):
+            loaded_env = _read_env_file(secrets_path)
+            secret = loaded_env.get(name)
+            if not secret and name == "AI_GATEWAY_API_KEY":
+                secret = loaded_env.get("AGY_JEV_API_KEY")
+            if secret and secret.strip():
+                break
+    if not secret or not secret.strip():
         raise ConfigurationError("CREDENTIAL_MISSING",
                                  f"the environment variable {name} is empty or unset; export the provider "
                                  "credential before searching")
@@ -333,7 +374,20 @@ def doctor_report(loaded: dict, env: Optional[dict] = None, counter_id: str = RE
     """Describe the configuration exactly as the engine will use it; no provider call."""
     env = env if env is not None else dict(os.environ)
     config = loaded["config"]
-    secret = env.get(config["provider"]["api_key_env"])
+    name = config["provider"]["api_key_env"]
+    secret = env.get(name)
+    if not secret or not secret.strip():
+        home = os.path.expanduser("~")
+        for secrets_path in (
+            os.path.join(home, ".config", "jevgrep", "secrets.env"),
+            os.path.join(home, ".config", "agy", "sage.env"),
+        ):
+            loaded_env = _read_env_file(secrets_path)
+            secret = loaded_env.get(name)
+            if not secret and name == "AI_GATEWAY_API_KEY":
+                secret = loaded_env.get("AGY_JEV_API_KEY")
+            if secret and secret.strip():
+                break
     has_secret = bool(secret and secret.strip())
     credential = ("not_required" if not config["remote_evaluation_enabled"]
                   else "present" if has_secret else "missing")

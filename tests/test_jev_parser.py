@@ -137,13 +137,11 @@ class ParserTests(unittest.TestCase):
             load_case("nope")
 
     def test_case_missing_section_rejected(self):
-        import yaml
         from sage.jev.request import parser
         import tempfile, pathlib
         with tempfile.TemporaryDirectory() as tmp:
             bad = pathlib.Path(tmp, "jev.yaml")
-            bad.write_text(yaml.safe_dump({"version": 1, "compass": {"state": {}}}),
-                           encoding="utf-8")
+            bad.write_text("version: 1\ncompass:\n  state: {}\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 parser.load_case("compass", bad)
 

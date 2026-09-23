@@ -20,6 +20,14 @@ ROLLING_MODELS = ("typesafe-ai/jev", "typesafe/jev-1.13", "jev-latest", "jev-pre
 
 
 def batch_limits(adapter: str = "typesafe-direct") -> dict:
+    if adapter == "vercel-ai-gateway":
+        return {
+            "total_tokens": 32_000,
+            "per_question_tokens": 32_000,
+            "headroom_ratio": 0.7,
+            "max_items": 16,
+            "max_request_bytes": 65_536,
+        }
     return {
         "total_tokens": 64_000 if adapter == "typesafe-direct" else 32_000,
         "per_question_tokens": 32_000,

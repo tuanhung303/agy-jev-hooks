@@ -69,8 +69,15 @@ class _ActiveCall:
         self.done = threading.Event()
 
 
-def run_mcp_server(engine: SearchEngine, input_stream: IO[str], output: IO[str], error_output: IO[str],
-                   server_version: str, on_close: Optional[Callable[[], None]] = None) -> None:
+def run_mcp_server(engine: Optional[SearchEngine] = None, input_stream: IO[str] = sys.stdin,
+                   output: IO[str] = sys.stdout, error_output: IO[str] = sys.stderr,
+                   server_version: str = "", on_close: Optional[Callable[[], None]] = None,
+                   engine_resolver: Optional[Callable[[dict], SearchEngine]] = None) -> None:
+    from .config import ConfigurationError
+    from .lifecycle import Clock
+    fallback_clock = Clock()
+    resolved_engine = [engine]
+    workspace_context: dict = {}
     lock = threading.Lock()
     active: Dict[str, _ActiveCall] = {}
     state = {"running": None, "queued": None}  # type: ignore
@@ -103,11 +110,19 @@ def run_mcp_server(engine: SearchEngine, input_stream: IO[str], output: IO[str],
 
     def execute(call: _ActiveCall) -> None:
         try:
-            result = engine.search(call.arguments, {
+            active_engine = resolved_engine[0]
+            if active_engine is None and engine_resolver is not None:
+                active_engine = engine_resolver(workspace_context)
+                resolved_engine[0] = active_engine
+            if active_engine is None:
+                raise ConfigurationError("INVALID_CONFIG", "no authorized JevGrep profile could be resolved")
+            result = active_engine.search(call.arguments, {
                 "cancel_event": call.cancel_event, "started_at_ms": call.started_at_ms,
                 "search_id": None,
             })
             emit(call, payload=tool_result(result["outcome"]))
+        except ConfigurationError as cause:
+            emit(call, payload=tool_result(create_search_error(cause.code, str(uuid.uuid4()))))
         except Exception:
             log("jevgrep mcp tool failure")
             emit(call, error="the search failed before a report could be produced")
@@ -134,7 +149,8 @@ def run_mcp_server(engine: SearchEngine, input_stream: IO[str], output: IO[str],
                 send({"jsonrpc": "2.0", "id": call_id,
                       "result": tool_result(create_search_error("BUSY", str(uuid.uuid4())))})
                 return
-            call = _ActiveCall(call_id, engine.clock.now_ms, record.get("arguments") or {})
+            clock_ms = resolved_engine[0].clock.now_ms if resolved_engine[0] is not None else fallback_clock.now_ms
+            call = _ActiveCall(call_id, clock_ms, record.get("arguments") or {})
             active[call_key(call_id)] = call
             start_now = state["running"] is None
             if start_now:
@@ -150,8 +166,15 @@ def run_mcp_server(engine: SearchEngine, input_stream: IO[str], output: IO[str],
         if call_id is None and not method.startswith("notifications/"):
             return
         if method == "initialize":
-            requested = (message.get("params") or {}).get("protocolVersion")
+            params = message.get("params") or {}
+            requested = params.get("protocolVersion")
             protocol_version = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+            root_uri = params.get("rootUri")
+            if root_uri and isinstance(root_uri, str):
+                workspace_context["root_uri"] = root_uri
+            workspace_folders = params.get("workspaceFolders")
+            if workspace_folders and isinstance(workspace_folders, list):
+                workspace_context["workspace_folders"] = workspace_folders
             send({"jsonrpc": "2.0", "id": call_id, "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},

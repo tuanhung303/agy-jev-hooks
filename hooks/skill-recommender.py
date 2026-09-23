@@ -110,7 +110,7 @@ def extract_prompt(payload):
     return ""
 
 
-def extract_prompt_from_transcript(transcript_path, tail_bytes=65536):
+def extract_prompt_from_transcript(transcript_path, tail_bytes=262144):
     """Last human/user text from a transcript (AGY USER_INPUT steps first)."""
     try:
         with open(transcript_path, "rb") as handle:
@@ -136,6 +136,16 @@ def extract_prompt_from_transcript(transcript_path, tail_bytes=65536):
                 text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text").strip()
                 if text:
                     user_text = text
+        if not user_text and size > tail_bytes:
+            # Fallback for very long sessions: read from start to find last USER_INPUT
+            with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(entry, dict) and entry.get("type") == "USER_INPUT" and str(entry.get("content") or "").strip():
+                        user_text = str(entry["content"]).strip()
         return user_text
     except OSError:
         return ""

@@ -13,9 +13,20 @@ if [ -f "$HOME/.config/agy/sage.env" ]; then
   set +a
 fi
 
+if [ -f "$HOME/.config/jevgrep/secrets.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$HOME/.config/jevgrep/secrets.env"
+  set +a
+fi
+
 # The sage gateway key is a Vercel AI Gateway key under its own name.
 if [ -z "${AI_GATEWAY_API_KEY:-}" ] && [ -n "${AGY_JEV_API_KEY:-}" ]; then
   export AI_GATEWAY_API_KEY="$AGY_JEV_API_KEY"
+fi
+
+if [ "$PWD" = "/" ] && [ -d "$REPO" ]; then
+  cd "$REPO"
 fi
 
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"

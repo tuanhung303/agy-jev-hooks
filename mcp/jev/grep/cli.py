@@ -159,13 +159,41 @@ def command_cache(args) -> int:
 
 def command_mcp(args) -> int:
     from .mcp_server import run_mcp_server
+    engine = None
     try:
         loaded = _load(args)
-    except ConfigurationError as cause:
-        print(cause.detail, file=sys.stderr)
-        return 2
-    engine = SearchEngine(loaded, env=dict(os.environ))
-    run_mcp_server(engine, sys.stdin, sys.stdout, sys.stderr, __version__)
+        engine = SearchEngine(loaded, env=dict(os.environ))
+    except ConfigurationError:
+        pass
+
+    def resolve_engine(context: dict) -> SearchEngine:
+        root_uri = context.get("root_uri")
+        if root_uri and isinstance(root_uri, str):
+            from urllib.parse import unquote, urlparse
+            parsed_path = unquote(urlparse(root_uri).path)
+            if parsed_path and os.path.exists(parsed_path):
+                try:
+                    loaded = load_configuration(find_profile_for(cwd=parsed_path, env=dict(os.environ)))
+                    return SearchEngine(loaded, env=dict(os.environ))
+                except ConfigurationError:
+                    pass
+
+        for folder in context.get("workspace_folders") or []:
+            uri = folder.get("uri") if isinstance(folder, dict) else None
+            if uri:
+                from urllib.parse import unquote, urlparse
+                folder_path = unquote(urlparse(uri).path)
+                if folder_path and os.path.exists(folder_path):
+                    try:
+                        loaded = load_configuration(find_profile_for(cwd=folder_path, env=dict(os.environ)))
+                        return SearchEngine(loaded, env=dict(os.environ))
+                    except ConfigurationError:
+                        pass
+
+        loaded = _load(args)
+        return SearchEngine(loaded, env=dict(os.environ))
+
+    run_mcp_server(engine, sys.stdin, sys.stdout, sys.stderr, __version__, engine_resolver=resolve_engine)
     return 0
 
 
