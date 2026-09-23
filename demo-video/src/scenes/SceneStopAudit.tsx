@@ -124,7 +124,7 @@ export const SceneStopAudit: React.FC = () => {
               }}
             >
               <span>label: undone</span>
-              <span>p = 0.88 (FIRE >= 0.75)</span>
+              <span>p = 0.88 (FIRE &gt;= 0.75)</span>
             </div>
             <div
               style={{
