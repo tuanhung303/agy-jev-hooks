@@ -1,0 +1,20 @@
+{
+  "name": "jev-hooks-remotion-demo",
+  "version": "1.0.0",
+  "description": "Remotion video-as-code explainer for TypeSafe Jev, Skill Routing, and Stop Audit Hooks",
+  "scripts": {
+    "dev": "remotion preview",
+    "build": "remotion render src/index.ts JevHooksExplainer out/jev-hooks-demo.mp4",
+    "still": "remotion still src/index.ts JevHooksExplainer out/poster.jpg"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.240",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.240"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "typescript": "^5.5.4"
+  }
+}

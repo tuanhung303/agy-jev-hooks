@@ -1,0 +1,1764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TypeSafe Jev: Skill Routing & Stop Gate · 120s Cinematic Motion Graphics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Inter+Tight:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&family=Shantell+Sans:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #FFFFFF;
+      --card-bg: #FFFFFF;
+      --surface: #F8FAFC;
+      --surface-blue: #F0F5FF;
+      --surface-amber: #FFFBEB;
+      --surface-red: #FEF2F2;
+      --surface-green: #F0FDF4;
+      --border: #E2E8F0;
+      --border-strong: #CBD5E1;
+      --ink: #0F172A;
+      --ink-soft: #334155;
+      --muted: #64748B;
+      --blue: #1D4ED8;
+      --blue-dark: #1E40AF;
+      --green: #059669;
+      --amber: #D97706;
+      --red: #DC2626;
+      --note-paper: #FEF9C3;
+      --note-border: #FDE047;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08);
+      --topbar-h: 60px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Inter', -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+    .topbar {
+      height: var(--topbar-h);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .brand-title {
+      font-family: 'Inter Tight', sans-serif;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.3px;
+      color: var(--ink);
+    }
+    .brand-title span { color: var(--blue); }
+    .badge-pill {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--surface-blue);
+      color: var(--blue);
+      border: 1px solid rgba(29, 78, 216, 0.2);
+    }
+    .main-container {
+      max-width: 1460px;
+      margin: 0 auto;
+      padding: 20px 24px 40px;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 24px;
+    }
+    @media (max-width: 1080px) {
+      .main-container { grid-template-columns: 1fr; }
+    }
+    .player-box {
+      background: #FFFFFF;
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      box-shadow: 0 12px 36px -8px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
+      aspect-ratio: 16 / 9.2;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    canvas#stage {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: calc(100% - 60px);
+      background: #FFFFFF;
+      z-index: 1;
+    }
+    .dom-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 60px;
+      z-index: 2;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 16px 24px;
+    }
+    .hud-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .kicker-tag {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: var(--blue);
+      background: rgba(255, 255, 255, 0.95);
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    .hud-stats {
+      display: flex;
+      gap: 8px;
+    }
+    .hud-stat-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.95);
+      padding: 5px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    .subtitle-dock {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 8px;
+    }
+    .subtitle-bar {
+      background: rgba(15, 23, 42, 0.93);
+      color: #FFFFFF;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 24px;
+      border-radius: 999px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.28);
+      backdrop-filter: blur(12px);
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      max-width: 92%;
+      text-align: center;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+    .wave-bar {
+      width: 3px;
+      background: #38BDF8;
+      border-radius: 2px;
+      animation: wave 0.7s ease-in-out infinite alternate;
+    }
+    .wave-bar:nth-child(2) { animation-delay: 0.2s; height: 12px; }
+    .wave-bar:nth-child(3) { animation-delay: 0.4s; height: 8px; }
+    .wave-bar:nth-child(4) { animation-delay: 0.15s; height: 14px; }
+    @keyframes wave {
+      0% { height: 3px; }
+      100% { height: 14px; }
+    }
+    .player-controls {
+      height: 60px;
+      background: #FFFFFF;
+      border-top: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      z-index: 10;
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+    }
+    .btn-ctrl {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--ink);
+      height: 34px;
+      padding: 0 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s;
+    }
+    .btn-ctrl:hover { background: #EEF2F6; }
+    .btn-play {
+      background: var(--blue);
+      color: #FFFFFF;
+      border: 0;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-play:hover { background: var(--blue-dark); transform: scale(1.05); }
+    .progress-bar {
+      flex: 1;
+      height: 6px;
+      background: #E2E8F0;
+      border-radius: 3px;
+      cursor: pointer;
+      position: relative;
+    }
+    .progress-fill {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      background: var(--blue);
+      border-radius: 3px;
+      width: 0%;
+    }
+    .time-readout {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      width: 95px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .chapter-heading {
+      font-family: 'Inter Tight', sans-serif;
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .chapter-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .chapter-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--ink-soft);
+      text-align: left;
+      transition: all 0.15s;
+    }
+    .chapter-row:hover {
+      background: #F1F5F9;
+      border-color: var(--border-strong);
+    }
+    .chapter-row.active {
+      background: var(--surface-blue);
+      border-color: rgba(29, 78, 216, 0.3);
+      color: var(--blue);
+      font-weight: 700;
+    }
+    .chapter-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      width: 36px;
+      flex-shrink: 0;
+      color: var(--muted);
+    }
+    .chapter-row.active .chapter-time { color: var(--blue); }
+    .spec-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 11.5px;
+      line-height: 1.55;
+    }
+    .spec-card h5 {
+      font-family: 'Inter Tight', sans-serif;
+      font-size: 12.5px;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 6px;
+    }
+    .badge-route {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .route-h { background: #FEE2E2; color: #DC2626; }
+    .route-n { background: #FEF3C7; color: #D97706; }
+    .route-pass { background: #DCFCE7; color: #16A34A; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="brand-title">TypeSafe Jev <span>·</span> Skill Routing & Stop Gate</div>
+      <div class="badge-pill">Veritasium 3-Part Formula · 120s Motion Graphics</div>
+    </div>
+    <div style="font-size: 12px; color: var(--muted); font-weight: 500;">
+      Repository: <code style="font-family:'JetBrains Mono'; color:var(--ink);">agy-jev-hooks</code>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <div>
+      <div class="player-box" id="playerBox">
+        <canvas id="stage" width="1920" height="1020"></canvas>
+
+        <div class="dom-overlay">
+          <div class="hud-top">
+            <span class="kicker-tag" id="hudKicker">ACT 1 · THE MISCONCEPTION</span>
+            <div class="hud-stats">
+              <span class="hud-stat-pill" id="hudTrack">A-PLOT ⇄ B-PLOT ACTIVE</span>
+              <span class="hud-stat-pill" id="hudCamera">CAM: 1.00× (PUSH-IN ACTIVE)</span>
+              <span class="hud-stat-pill" id="hudFps">60 FPS · FRAME 0</span>
+            </div>
+          </div>
+
+          <div class="subtitle-dock">
+            <div class="subtitle-bar" id="hudSubtitle">
+              <div class="waveform" id="waveformContainer">
+                <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+              </div>
+              <span id="subtitleText">Loading Veritasium 3-part narrative storyboard...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="player-controls">
+          <button class="btn-play" id="btnPlay" onclick="togglePlay()">▶</button>
+          <div class="progress-bar" id="progressBar" onclick="seek(event)">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="time-readout" id="timeReadout">0:00 / 2:00</div>
+          <button class="btn-ctrl" id="btnAudio" onclick="toggleAudio()">
+            <span id="audioIcon">🔊</span> <span id="audioLabel">Sound ON</span>
+          </button>
+          <button class="btn-ctrl" id="btnSpeed" onclick="cycleSpeed()">1×</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 14px; font-size: 12px; color: var(--muted); line-height: 1.6;">
+        Engineered per the <strong>Veritasium Storytelling Formula</strong> (<a href="file:///Users/__blitzzz/Documents/GitHub/agentic/skills/blitzz-design/references/remotion-motion-design.md" style="color:var(--blue); text-decoration:none; font-weight:600;">references/remotion-motion-design.md</a>):
+        Misconception Hook → Question Before Explanation → A-Plot (Agent stakes) & B-Plot (Ground truth receipts) tension cutting, with 2.5D kinematics, safe layout zones, and Web Audio SFX.
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div>
+        <div class="chapter-heading">
+          <span>Veritasium Storyboard (120s)</span>
+          <span style="font-size:11px; color:var(--muted); font-weight:500;">7 scenes</span>
+        </div>
+        <div class="chapter-list" id="chapterList"></div>
+      </div>
+
+      <div class="spec-card" style="background:#EFF6FF; border-color:#BFDBFE;">
+        <h5 style="color:#1D4ED8;">The Veritasium Formula Applied</h5>
+        <div style="font-size:11px; color:#1E3A8A; line-height:1.5;">
+          • <strong>Misconception:</strong> We thought agent evaluation needs big generative LLMs.<br>
+          • <strong>The Question:</strong> Can a 150ms reflex catch bugs and blast radius without loops?<br>
+          • <strong>A-Plot:</strong> Agent claims & code changes in editor.<br>
+          • <strong>B-Plot:</strong> Jev Compass receipts, radar scan & gate enforcement.
+        </div>
+      </div>
+
+      <div class="spec-card">
+        <h5>Compass Stop-Gate Route Taxonomy</h5>
+        <div style="display:flex; flex-direction:column; gap:6px; margin-top:4px;">
+          <div><span class="badge-route route-h">Route H</span> <strong>Hard Escalate (Floor 0.75):</strong> Chặn dừng ngay, tiêm lệnh sửa lỗi. (undone, blast_radius, faked_evidence).</div>
+          <div><span class="badge-route route-n">Route N</span> <strong>Note (Floor 0.70):</strong> Không chặn, chỉ ghi chú chất lượng. (code_slop).</div>
+          <div><span class="badge-route route-pass">q_pass</span> <strong>Clean Pass (>= 0.75):</strong> Hoàn thành đầy đủ có bằng chứng thật.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d');
+
+    const TOTAL_DURATION = 120.0;
+    const FPS = 30;
+    const TOTAL_FRAMES = TOTAL_DURATION * FPS;
+
+    let currentTime = 0;
+    let isPlaying = true;
+    let speed = 1.0;
+    let lastTime = performance.now();
+    let audioEnabled = true;
+
+    // --- PROCEDURAL WEB AUDIO SYNTHESIZER ---
+    let audioCtx = null;
+    function getAudioContext() {
+      if (!audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      return audioCtx;
+    }
+
+    function sfxClick() {
+      if (!audioEnabled) return;
+      try {
+        const ac = getAudioContext();
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+        const filter = ac.createBiquadFilter();
+
+        filter.type = 'bandpass';
+        filter.frequency.value = 2400 + Math.random() * 600;
+        filter.Q.value = 3.5;
+
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(340 + Math.random() * 60, ac.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(70, ac.currentTime + 0.025);
+
+        gain.gain.setValueAtTime(0.07, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.03);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(ac.destination);
+
+        osc.start();
+        osc.stop(ac.currentTime + 0.035);
+      } catch (e) {}
+    }
+
+    function sfxRadarPing() {
+      if (!audioEnabled) return;
+      try {
+        const ac = getAudioContext();
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ac.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(440, ac.currentTime + 0.22);
+
+        gain.gain.setValueAtTime(0.1, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.28);
+
+        osc.connect(gain);
+        gain.connect(ac.destination);
+
+        osc.start();
+        osc.stop(ac.currentTime + 0.3);
+      } catch (e) {}
+    }
+
+    function sfxGateSlam() {
+      if (!audioEnabled) return;
+      try {
+        const ac = getAudioContext();
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(105, ac.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(28, ac.currentTime + 0.35);
+
+        gain.gain.setValueAtTime(0.32, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.42);
+
+        osc.connect(gain);
+        gain.connect(ac.destination);
+
+        osc.start();
+        osc.stop(ac.currentTime + 0.45);
+      } catch (e) {}
+    }
+
+    function sfxCleanPass() {
+      if (!audioEnabled) return;
+      try {
+        const ac = getAudioContext();
+        const notes = [1318.51, 1661.22, 1975.53, 2637.02]; // E6, G#6, B6, E7
+        notes.forEach((freq, idx) => {
+          const osc = ac.createOscillator();
+          const gain = ac.createGain();
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, ac.currentTime + idx * 0.07);
+
+          const startTime = ac.currentTime + idx * 0.07;
+          gain.gain.setValueAtTime(0.001, startTime);
+          gain.gain.linearRampToValueAtTime(0.14, startTime + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.55);
+
+          osc.connect(gain);
+          gain.connect(ac.destination);
+
+          osc.start(startTime);
+          osc.stop(startTime + 0.6);
+        });
+      } catch (e) {}
+    }
+
+    function toggleAudio() {
+      audioEnabled = !audioEnabled;
+      document.getElementById('audioIcon').textContent = audioEnabled ? '🔊' : '🔇';
+      document.getElementById('audioLabel').textContent = audioEnabled ? 'Sound ON' : 'Muted';
+      if (audioEnabled) getAudioContext();
+    }
+
+    // Chapters definition (120s total, Veritasium formula structured)
+    const CHAPTERS = [
+      { t: 0,   dur: 16, title: "1. The Misconception (System 2 vs 1)", kicker: "ACT 1 · THE MISCONCEPTION", text: "Misconception: We thought AI agent evaluation needs giant generative LLMs. But when agents hallucinate, slow LLMs drift and miss raw receipts." },
+      { t: 16,  dur: 20, title: "2. The Question: 140ms Skill Routing", kicker: "ACT 1 · QUESTION BEFORE EXPLANATION", text: "Question: Can we steer agent intent before it writes bad code? Jev Choice evaluates 19 skills in 140ms and injects /ponytail at p=0.94." },
+      { t: 36,  dur: 16, title: "3. Ground Truth: 5-Block Evidence", kicker: "ACT 2 · B-PLOT GROUND TRUTH", text: "The Foundation: Evidence is data, not instructions. The hook extracts commands, diffs, OCR text, caller graphs, and prompt pairs." },
+      { t: 52,  dur: 18, title: "4. A/B Clash 1: Premature Stop & Exit 2", kicker: "ACT 2 · A/B PLOT CLASH (ROUTE H UNDONE)", text: "A-Plot Agent claims tests pass; B-Plot receipts show zero pytest calls. Jev Compass fires undone (p=0.88) and slams the gate shut!" },
+      { t: 70,  dur: 16, title: "5. A/B Clash 2: Style Trap & Route N", kicker: "ACT 2 · AXIS SEPARATION (ROUTE N CODE SLOP)", text: "The Dilemma: Should code slop block execution? No! Jev decouples Completeness (Pass) from Quality (Note) to prevent infinite loops." },
+      { t: 86,  dur: 18, title: "6. A/B Clash 3: Blast Radius & Fakes", kicker: "ACT 2 · HIDDEN DEFECTS (BLAST RADIUS & FAKE)", text: "Caller Radar scans untouched export peers; receipt audit catches fake stubbed doubles. Route H blocks the stop event immediately." },
+      { t: 104, dur: 16, title: "7. Resolution: Steer & Clean Pass", kicker: "ACT 3 · SELF-HEALING & THE CLEAN PASS", text: "Actionable steering forces the agent to run full peer tests (220/220 passed). Re-audit confirms q_pass=0.98 for an approved clean exit." }
+    ];
+
+    function spring(frame, delay, stiffness = 100, damping = 12) {
+      const t = Math.max(0, (frame - delay) / FPS);
+      if (t === 0) return 0;
+      const omega = Math.sqrt(stiffness);
+      const decay = Math.exp(-damping * t * 0.5);
+      return 1 - decay * Math.cos(omega * t);
+    }
+
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.lineTo(x + width - radius, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+      ctx.lineTo(x + width, y + height - radius);
+      ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+      ctx.lineTo(x + radius, y + height);
+      ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+      ctx.lineTo(x, y + radius);
+      ctx.quadraticCurveTo(x, y, x + radius, y);
+      ctx.closePath();
+      if (fill) ctx.fill();
+      if (stroke) ctx.stroke();
+    }
+
+    // Blitzz design Shantell Sans yellow note (Safe layout: strictly within bounded slot)
+    function drawHandwrittenNote(ctx, x, y, width, height, text) {
+      ctx.save();
+      ctx.fillStyle = "#FEF9C3";
+      ctx.strokeStyle = "#FDE047";
+      ctx.lineWidth = 1;
+      roundRect(ctx, x, y, width, height, 6, true, true);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.font = "400 15px 'Shantell Sans', cursive";
+      ctx.fillText(text, x + 16, y + 28);
+      ctx.restore();
+    }
+
+    // Dual-Plot Cinematic Badge
+    function drawPlotBadge(ctx, x, y, isAPlot, label) {
+      ctx.save();
+      if (isAPlot) {
+        ctx.fillStyle = "#EFF6FF";
+        ctx.strokeStyle = "#1D4ED8";
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, 220, 26, 6, true, true);
+        ctx.fillStyle = "#1D4ED8";
+        ctx.font = "800 11px 'Inter Tight', sans-serif";
+        ctx.fillText("A-PLOT · NARRATIVE STAKES", x + 12, y + 17);
+      } else {
+        ctx.fillStyle = "#F0FDF4";
+        ctx.strokeStyle = "#059669";
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, 220, 26, 6, true, true);
+        ctx.fillStyle = "#059669";
+        ctx.font = "800 11px 'Inter Tight', sans-serif";
+        ctx.fillText("B-PLOT · GROUND TRUTH RECEIPTS", x + 12, y + 17);
+      }
+      ctx.restore();
+    }
+
+    // Developer Physicality: macOS Terminal
+    function drawMacTerminal(ctx, x, y, w, h, title, promptText, outputLines, cursorVisible) {
+      ctx.save();
+      ctx.fillStyle = "#0F172A";
+      ctx.strokeStyle = "#334155";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, x, y, w, h, 10, true, true);
+
+      // Window titlebar
+      ctx.fillStyle = "#1E293B";
+      roundRect(ctx, x, y, w, 32, 10, true, false);
+      ctx.fillRect(x, y + 20, w, 12);
+
+      // Traffic lights
+      const dots = [
+        { c: "#FF5F56", x: x + 14 },
+        { c: "#FFBD2E", x: x + 30 },
+        { c: "#27C93F", x: x + 46 }
+      ];
+      dots.forEach(d => {
+        ctx.fillStyle = d.c;
+        ctx.beginPath();
+        ctx.arc(d.x, y + 16, 5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // Title
+      ctx.fillStyle = "#94A3B8";
+      ctx.font = "600 11.5px 'JetBrains Mono', monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(title, x + w / 2, y + 20);
+      ctx.textAlign = "left";
+
+      // Body
+      let curY = y + 54;
+      ctx.fillStyle = "#38BDF8";
+      ctx.font = "700 13.5px 'JetBrains Mono', monospace";
+      ctx.fillText("user@dev-box:~/agy-jev-hooks (main)", x + 16, curY);
+
+      curY += 22;
+      ctx.fillStyle = "#F8FAFC";
+      ctx.fillText("❯ " + promptText + (cursorVisible ? " █" : ""), x + 16, curY);
+
+      curY += 24;
+      outputLines.forEach(line => {
+        ctx.fillStyle = line.color || "#94A3B8";
+        ctx.font = (line.bold ? "700 " : "400 ") + "13px 'JetBrains Mono', monospace";
+        ctx.fillText(line.text, x + 16, curY);
+        curY += 20;
+      });
+
+      ctx.restore();
+    }
+
+    // Developer Physicality: VS Code Diff Viewer (Anti-clipping clamped layout)
+    function drawCodeEditor(ctx, x, y, w, h, filename, lines) {
+      ctx.save();
+      ctx.fillStyle = "#0F172A";
+      ctx.strokeStyle = "#334155";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, x, y, w, h, 10, true, true);
+
+      // Tab bar
+      ctx.fillStyle = "#1E293B";
+      roundRect(ctx, x, y, w, 30, 10, true, false);
+      ctx.fillRect(x, y + 18, w, 12);
+
+      // Active file tab
+      ctx.fillStyle = "#0F172A";
+      roundRect(ctx, x + 10, y + 4, 160, 26, 6, true, false);
+      ctx.fillStyle = "#38BDF8";
+      ctx.font = "700 11.5px 'JetBrains Mono', monospace";
+      ctx.fillText("py  " + filename, x + 24, y + 20);
+
+      // Gutter & tokens
+      let curY = y + 50;
+      lines.forEach((l, idx) => {
+        if (l.diff === '+') {
+          ctx.fillStyle = "rgba(16, 185, 129, 0.15)";
+          ctx.fillRect(x + 1, curY - 14, w - 2, 20);
+        } else if (l.diff === '-') {
+          ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
+          ctx.fillRect(x + 1, curY - 14, w - 2, 20);
+        }
+
+        ctx.fillStyle = "#475569";
+        ctx.font = "500 12px 'JetBrains Mono', monospace";
+        ctx.textAlign = "right";
+        ctx.fillText((idx + 1).toString(), x + 36, curY);
+        ctx.textAlign = "left";
+
+        if (l.diff === '+') {
+          ctx.fillStyle = "#10B981";
+          ctx.font = "700 12px 'JetBrains Mono', monospace";
+          ctx.fillText("+", x + 46, curY);
+        } else if (l.diff === '-') {
+          ctx.fillStyle = "#EF4444";
+          ctx.font = "700 12px 'JetBrains Mono', monospace";
+          ctx.fillText("-", x + 46, curY);
+        }
+
+        ctx.font = "500 12px 'JetBrains Mono', monospace";
+        let tokenX = x + 62;
+        l.tokens.forEach(tok => {
+          ctx.fillStyle = tok.c;
+          ctx.fillText(tok.t, tokenX, curY);
+          tokenX += ctx.measureText(tok.t).width;
+        });
+
+        curY += 21;
+      });
+
+      ctx.restore();
+    }
+
+    // Rough Notation Simulators
+    function drawRoughCircle(ctx, cx, cy, rx, ry, progress, color) {
+      if (progress <= 0) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = "round";
+
+      const maxAngle = Math.PI * 2 * clamp(progress, 0, 1);
+      ctx.beginPath();
+      for (let a = 0; a <= maxAngle; a += 0.08) {
+        const wobble = Math.sin(a * 4) * 2;
+        const px = cx + (rx + wobble) * Math.cos(a);
+        const py = cy + (ry + wobble * 0.6) * Math.sin(a);
+        if (a === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawRoughUnderline(ctx, x, y, width, progress, color) {
+      if (progress <= 0) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = "round";
+
+      const targetW = width * clamp(progress, 0, 1);
+      ctx.beginPath();
+      for (let dx = 0; dx <= targetW; dx += 4) {
+        const dy = Math.sin(dx * 0.15) * 2;
+        if (dx === 0) ctx.moveTo(x, y + dy);
+        else ctx.lineTo(x + dx, y + dy);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawRoughStrike(ctx, x, y, width, progress, color) {
+      if (progress <= 0) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+
+      const targetW = width * clamp(progress, 0, 1);
+      ctx.beginPath();
+      ctx.moveTo(x, y - 2);
+      ctx.lineTo(x + targetW, y + 4);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Virtual Camera Kinematics (Centered viewport, safe bounds)
+    const camera = {
+      x: 960,
+      y: 470,
+      zoom: 1.0,
+      shake: 0
+    };
+
+    function updateCamera(targetX, targetY, targetZoom, shakeAmount = 0) {
+      camera.x = lerp(camera.x, targetX, 0.12);
+      camera.y = lerp(camera.y, targetY, 0.12);
+      camera.zoom = lerp(camera.zoom, targetZoom, 0.12);
+      camera.shake = lerp(camera.shake, shakeAmount, 0.2);
+    }
+
+    function applyCamera(ctx) {
+      const shakeX = (Math.random() - 0.5) * camera.shake * 8;
+      const shakeY = (Math.random() - 0.5) * camera.shake * 8;
+      ctx.translate(960 + shakeX, 470 + shakeY);
+      ctx.scale(camera.zoom, camera.zoom);
+      ctx.translate(-camera.x, -camera.y);
+    }
+
+    const soundEvents = {
+      s4GateSlam: false,
+      s6Radar: false,
+      s7Chime: false
+    };
+
+    // --- 7 SCENES (VERITASIUM STORYTELLING FORMULA) ---
+
+    // 1. The Misconception: Generative LLM vs System 1 Reflex (0 - 16s)
+    function drawScene1(t) {
+      const f = t * FPS;
+      if (t < 7) {
+        updateCamera(960, 470, 1.00);
+      } else {
+        updateCamera(1400, 440, 1.15); // Push-in on Jev reflex
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Subtle background grid
+      ctx.strokeStyle = "#F1F5F9";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < 1920; x += 60) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 1020); ctx.stroke();
+      }
+
+      // Header
+      const headerS = spring(f, 0, 80, 10);
+      ctx.save();
+      ctx.translate(100, 65 + (1 - headerS) * -20);
+      ctx.fillStyle = "#1D4ED8";
+      ctx.font = "800 15px 'Inter Tight', sans-serif";
+      ctx.fillText("ACT 1 · THE MISCONCEPTION", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight', sans-serif";
+      ctx.fillText("Why Big LLMs Fail at Agent Verification (And the 142ms Fix)", 0, 44);
+      ctx.restore();
+
+      // Left Column: The Misconception (Generative LLM Supervision)
+      const leftS = spring(f, 5, 90, 12);
+      ctx.save();
+      ctx.translate(100, 135 + (1 - leftS) * 30);
+      ctx.fillStyle = "#F8FAFC";
+      ctx.strokeStyle = "#E2E8F0";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 28, 24, true);
+
+      ctx.fillStyle = "#64748B";
+      ctx.font = "800 14px 'Inter Tight'";
+      ctx.fillText("THE COMMON MENTAL MODEL (SYSTEM 2 DELIBERATION)", 28, 78);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 28px 'Inter Tight'";
+      ctx.fillText("Generative LLM: Claude / GPT-4 / Gemini", 28, 115);
+
+      const creepingLatency = Math.min(6800, Math.floor(t * 700) + 200);
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "700 20px 'JetBrains Mono'";
+      ctx.fillText(`Latency: ${(creepingLatency/1000).toFixed(2)}s (Heavy reasoning lag)`, 28, 165);
+
+      ctx.fillStyle = "#334155";
+      ctx.font = "400 16.5px 'Inter'";
+      ctx.fillText("• Autoregressive token stream prone to prompt drift & excuses", 28, 220);
+      ctx.fillText("• High cost scaling with output tokens on every CLI step", 28, 265);
+      ctx.fillText("• Lacks direct access to bash exit codes and git diff receipts", 28, 310);
+      ctx.fillText("• Far too slow for inline pre-tool checks and stop execution barriers", 28, 355);
+
+      ctx.fillStyle = "#FEE2E2";
+      roundRect(ctx, 28, 410, 230, 40, 8, true, false);
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "700 13px 'Inter Tight'";
+      ctx.fillText("UNSUITABLE FOR HOOKS", 46, 435);
+      ctx.restore();
+
+      // Right Column: The Solution (TypeSafe Jev System 1 Reflex)
+      const rightS = spring(f, 10, 90, 12);
+      ctx.save();
+      ctx.translate(990, 135 + (1 - rightS) * 30);
+      ctx.fillStyle = "#F0FDF4";
+      ctx.strokeStyle = "#059669";
+      ctx.lineWidth = 2;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 28, 24, false);
+
+      ctx.fillStyle = "#059669";
+      ctx.font = "800 14px 'Inter Tight'";
+      ctx.fillText("THE SYSTEM 1 REALITY (DECISION-ONLY ENGINE)", 28, 78);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 28px 'Inter Tight'";
+      ctx.fillText("TypeSafe Jev: Sub-Second Reflex Barrier", 28, 115);
+
+      ctx.fillStyle = "#059669";
+      ctx.font = "800 24px 'JetBrains Mono'";
+      ctx.fillText("⚡ Response: 142ms (Single POST Call)", 28, 165);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.font = "500 16.5px 'Inter'";
+      ctx.fillText("• 3 question types only: Boolean, Choice, Score", 28, 220);
+      ctx.fillText("• Zero-hallucination: returns calibrated probabilities [0.0..1.0]", 28, 265);
+      ctx.fillText("• Bound by 8.0s timeout; fractions of LLM token cost", 28, 310);
+      ctx.fillText("• Built specifically for pre-tool and post-turn execution gates", 28, 355);
+
+      ctx.fillStyle = "#DCFCE7";
+      roundRect(ctx, 28, 410, 230, 40, 8, true, false);
+      ctx.fillStyle = "#16A34A";
+      ctx.font = "700 13px 'Inter Tight'";
+      ctx.fillText("BUILT FOR SAGE HOOKS", 46, 435);
+      ctx.restore();
+
+      // Bottom Note Lane (Safe slot: y=695, well above subtitle dock)
+      if (f > 25) {
+        drawHandwrittenNote(ctx, 1150, 695, 670, 46, "Misconception: LLMs can't judge LLMs in real-time. We need a calibrated reflex!");
+      }
+
+      ctx.restore();
+    }
+
+    // 2. Question Before Explanation: Pre-Turn Intent Routing (16 - 36s)
+    function drawScene2(t) {
+      const relT = t - 16.0;
+      const f = relT * FPS;
+
+      if (relT < 6) {
+        updateCamera(960, 230, 1.15); // Focus on terminal prompt typing
+      } else if (relT < 14) {
+        updateCamera(550, 440, 1.18); // Focus on winner /ponytail
+      } else {
+        updateCamera(960, 470, 1.02);
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#1D4ED8";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 1 · QUESTION BEFORE EXPLANATION", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("Can We Steer Agent Intent in <150ms Before It Writes Bad Code?", 0, 44);
+      ctx.restore();
+
+      // Top Full-Width Terminal: User Prompt
+      const fullPrompt = 'rút gọn hàm parse_payload này bằng thư viện chuẩn, không thêm abstraction thừa';
+      const promptChars = Math.min(fullPrompt.length, Math.floor(relT * 22));
+      const promptText = fullPrompt.substring(0, promptChars);
+
+      if (relT < 4.5 && Math.floor(f) % 3 === 0) {
+        sfxClick();
+      }
+
+      const termLines = [
+        { text: "Reading bounded AGENTS.md head context & guardrails...", color: "#64748B" },
+        { text: "Executing Jev Choice question across 19 skill criteria in parallel...", color: "#38BDF8", bold: true }
+      ];
+      drawMacTerminal(ctx, 100, 135, 1720, 155, "zsh · agy pre-hook router (hooks/skill-recommender.py)", promptText, termLines, relT < 4.5);
+
+      // Middle: 4 Candidate Cards
+      if (f > 22) {
+        const streamP = clamp((f - 22) / 20, 0, 1);
+        const candidates = [
+          { id: "/tdd", prob: 0.04, label: "Test-driven development", match: false, x: 100 },
+          { id: "/ponytail", prob: 0.94, label: "Minimal standard code", match: true, x: 550 },
+          { id: "/arch-drawing-skill", prob: 0.01, label: "Architecture diagrams", match: false, x: 1000 },
+          { id: "__none__", prob: 0.01, label: "Chitchat or trivial edit", match: false, x: 1450 }
+        ];
+
+        candidates.forEach((c, idx) => {
+          const cSpring = spring(f, 22 + idx * 4, 100, 12);
+          ctx.save();
+          ctx.translate(c.x, 320 + (1 - cSpring) * 25);
+
+          if (c.match) {
+            ctx.fillStyle = "#FEF3C7";
+            ctx.strokeStyle = "#D97706";
+            ctx.lineWidth = 2.5;
+          } else {
+            ctx.fillStyle = "#F8FAFC";
+            ctx.strokeStyle = "#E2E8F0";
+            ctx.lineWidth = 1.5;
+          }
+          roundRect(ctx, 0, 0, 370, 185, 14, true, true);
+
+          ctx.fillStyle = c.match ? "#B45309" : "#475569";
+          ctx.font = "800 24px 'JetBrains Mono'";
+          ctx.fillText(c.id, 20, 42);
+
+          ctx.fillStyle = c.match ? "#0F172A" : "#64748B";
+          ctx.font = "800 32px 'JetBrains Mono'";
+          const animProb = c.match ? (streamP * c.prob).toFixed(2) : c.prob.toFixed(2);
+          ctx.fillText(`p = ${animProb}`, 20, 95);
+
+          ctx.fillStyle = "#64748B";
+          ctx.font = "500 14px 'Inter'";
+          ctx.fillText(c.label, 20, 132);
+
+          if (c.match) {
+            ctx.fillStyle = "#D97706";
+            ctx.font = "800 13px 'Inter Tight'";
+            ctx.fillText("SELECTED WINNER (>= 0.60)", 20, 162);
+
+            const circleProg = clamp((relT - 6.0) * 2, 0, 1);
+            drawRoughCircle(ctx, 105, 85, 95, 30, circleProg, "#DC2626");
+          }
+          ctx.restore();
+        });
+      }
+
+      // Bottom Injected Suggestion (y=535) & Note (y=625)
+      if (f > 50) {
+        ctx.save();
+        ctx.translate(100, 535);
+        ctx.fillStyle = "#F0FDF4";
+        ctx.strokeStyle = "#059669";
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, 0, 0, 1720, 65, 10, true, true);
+
+        ctx.fillStyle = "#065F46";
+        ctx.font = "700 17px 'JetBrains Mono'";
+        ctx.fillText("INJECTED CONTEXT: ※ skill suggestion: /ponytail (p = 0.94) - Pick this for concrete implementation with least code", 24, 40);
+        ctx.restore();
+
+        drawHandwrittenNote(ctx, 1150, 625, 670, 44, "Injected in 140ms before the generative model produces a single token!");
+      }
+
+      ctx.restore();
+    }
+
+    // 3. Ground Truth: 5-Block Evidence Assembly Pipeline (36 - 52s)
+    function drawScene3(t) {
+      const relT = t - 36.0;
+      const f = relT * FPS;
+
+      updateCamera(960, 470, 1.02);
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#1D4ED8";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 2 · B-PLOT GROUND TRUTH FOUNDATION", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("Five-Block Reproducible Evidence Assembly (Data, Not Instructions)", 0, 44);
+      ctx.restore();
+
+      const blocks = [
+        { name: "1. Terminal Receipts", detail: "Exact bash commands run with exit codes and raw stdout/stderr", icon: "$", color: "#1D4ED8" },
+        { name: "2. Artifact Diffs", detail: "Git diff hunks, added/deleted lines verified directly on disk", icon: "Δ", color: "#059669" },
+        { name: "3. Screenshot OCR", detail: "OCR text extracted from headless browser UI captures", icon: "👁", color: "#7C3AED" },
+        { name: "4. Blast-Radius Graph", detail: "Downstream import callers that depend on touched files", icon: "⎘", color: "#D97706" },
+        { name: "5. Turn Pair", detail: "User ask + Agent statement (steering & system prompt stripped)", icon: "⇄", color: "#0284C7" }
+      ];
+
+      blocks.forEach((b, idx) => {
+        const bSpring = spring(f, idx * 5, 90, 12);
+        ctx.save();
+        ctx.translate(100 + idx * 350, 140 + (1 - bSpring) * 35);
+
+        ctx.fillStyle = "#F8FAFC";
+        ctx.strokeStyle = "#E2E8F0";
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, 0, 0, 320, 480, 14, true, true);
+
+        ctx.fillStyle = b.color;
+        roundRect(ctx, 0, 0, 320, 65, 14, true, false);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "900 22px 'Inter Tight'";
+        ctx.fillText(b.icon, 20, 42);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "700 14.5px 'Inter Tight'";
+        ctx.fillText(b.name, 52, 42);
+
+        ctx.fillStyle = "#334155";
+        ctx.font = "400 15px 'Inter'";
+        ctx.fillText(b.detail, 20, 115, 280);
+
+        ctx.fillStyle = "#94A3B8";
+        ctx.font = "600 12px 'JetBrains Mono'";
+        ctx.fillText("RAW RECEIPTS ONLY", 20, 420);
+        ctx.fillText("NO PROMPT INJECTION RISK", 20, 444);
+        ctx.restore();
+      });
+
+      if (f > 30) {
+        drawHandwrittenNote(ctx, 100, 650, 680, 44, "Veritasium rule: Evidence is data, not instructions. The agent cannot talk its way out.");
+      }
+
+      ctx.restore();
+    }
+
+    // 4. A/B Clash 1: Premature Stop & Exit Code 2 Slam (52 - 70s)
+    function drawScene4(t) {
+      const relT = t - 52.0;
+      const f = relT * FPS;
+
+      let shakeAmount = 0;
+      if (relT < 4.0) {
+        updateCamera(520, 440, 1.15); // A-Plot focus on agent claim & diff
+      } else if (relT >= 4.0 && relT < 4.8) {
+        shakeAmount = 1.4;
+        updateCamera(960, 470, 1.10, shakeAmount); // Gate slam impact
+        if (!soundEvents.s4GateSlam) {
+          sfxGateSlam();
+          soundEvents.s4GateSlam = true;
+        }
+      } else {
+        updateCamera(960, 470, 1.02);
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 2 · A/B PLOT CLASH 1 · ROUTE H (HARD ESCALATE)", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("Label 'undone': When the Agent Fakes a Finish", 0, 44);
+      ctx.restore();
+
+      // Left Column: A-Plot (Agent Claims vs Code Write)
+      const lSpring = spring(f, 0, 100, 12);
+      ctx.save();
+      ctx.translate(100, 135 + (1 - lSpring) * 30);
+      ctx.fillStyle = "#F8FAFC";
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, true);
+
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 16px 'Inter Tight'";
+      ctx.fillText("USER PROMPT:", 24, 75);
+      ctx.fillStyle = "#334155";
+      ctx.font = "600 15px 'JetBrains Mono'";
+      ctx.fillText('"Add retry limit to sync.py AND run full test suite."', 24, 102);
+
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 16px 'Inter Tight'";
+      ctx.fillText("AGENT STATEMENT:", 24, 145);
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "600 15px 'JetBrains Mono'";
+      ctx.fillText('"Added RETRY_LIMIT = 3 to sync.py. All tests pass."', 24, 172);
+
+      const syncLines = [
+        { diff: ' ', tokens: [{ t: "import time, sys", c: "#9333EA" }] },
+        { diff: '+', tokens: [{ t: "RETRY_LIMIT = 3", c: "#10B981" }, { t: "  # newly added flag", c: "#64748B" }] },
+        { diff: ' ', tokens: [{ t: "def run_sync(): pass", c: "#38BDF8" }] }
+      ];
+      drawCodeEditor(ctx, 24, 195, 782, 130, "scripts/sync.py", syncLines);
+
+      // Missing command receipt callout
+      ctx.fillStyle = "#FEF2F2";
+      ctx.strokeStyle = "#DC2626";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 24, 345, 782, 155, 10, true, true);
+
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "800 15px 'JetBrains Mono'";
+      ctx.fillText("[OBSERVED RECEIPT DEFICIT]", 42, 380);
+      ctx.fillStyle = "#7F1D1D";
+      ctx.font = "600 14.5px 'JetBrains Mono'";
+      ctx.fillText("• ZERO pytest commands in execution history!", 42, 415);
+      ctx.fillText("• Deliverable 'run full test suite' is demonstrably absent.", 42, 445);
+
+      const waveProg = clamp((relT - 1.5) * 1.5, 0, 1);
+      drawRoughUnderline(ctx, 42, 452, 530, waveProg, "#DC2626");
+      ctx.restore();
+
+      // Right Column: B-Plot (Jev Compass Stop Gate Slam)
+      const rSpring = spring(f, 8, 100, 11);
+      ctx.save();
+      ctx.translate(990, 135 + (1 - rSpring) * 30);
+      ctx.fillStyle = "#FEF2F2";
+      ctx.strokeStyle = "#DC2626";
+      ctx.lineWidth = 2;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, false);
+
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "800 18px 'Inter Tight'";
+      ctx.fillText("JEV COMPASS VERDICT", 24, 75);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.font = "700 19px 'JetBrains Mono'";
+      ctx.fillText("q_pass (Completeness):", 24, 135);
+      ctx.fillStyle = "#DC2626";
+      ctx.fillText("p = 0.15 (FAILED)", 420, 135);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.fillText("label: undone:", 24, 190);
+      ctx.fillStyle = "#DC2626";
+      ctx.fillText("p = 0.88 (FIRE >= 0.75)", 420, 190);
+
+      ctx.fillStyle = "#64748B";
+      ctx.fillText("label: code_slop:", 24, 245);
+      ctx.fillText("p = 0.02 (CLEAN)", 420, 245);
+
+      if (relT >= 4.0) {
+        const slamScale = Math.max(1, 1.6 - (relT - 4.0) * 3);
+        ctx.save();
+        ctx.translate(415, 360);
+        ctx.scale(slamScale, slamScale);
+        ctx.fillStyle = "#DC2626";
+        roundRect(ctx, -230, -32, 460, 64, 10, true, false);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "900 22px 'Inter Tight'";
+        ctx.textAlign = "center";
+        ctx.fillText("🛑 STOP REJECTED · EXIT CODE 2", 0, 7);
+        ctx.restore();
+
+        ctx.fillStyle = "#991B1B";
+        ctx.font = "700 15px 'Inter'";
+        ctx.textAlign = "center";
+        ctx.fillText("Required deliverable appears absent. Injected steer forces agent to run tests.", 415, 450);
+        ctx.textAlign = "left";
+      }
+      ctx.restore();
+
+      if (f > 30) {
+        drawHandwrittenNote(ctx, 1150, 690, 670, 44, "A-Plot makes a bare claim; B-Plot receipts prove pytest never ran!");
+      }
+
+      ctx.restore();
+    }
+
+    // 5. A/B Clash 2: The Style Trap & Non-Blocking Route N (70 - 86s)
+    function drawScene5(t) {
+      const relT = t - 70.0;
+      const f = relT * FPS;
+
+      if (relT < 6) {
+        updateCamera(520, 440, 1.15); // A-Plot focus on code slop diff
+      } else {
+        updateCamera(1400, 440, 1.15); // B-Plot focus on Route N
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#D97706";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 2 · A/B PLOT CLASH 2 · ROUTE N (NON-BLOCKING QUALITY NOTE)", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("The Style Dilemma: Never Trap Agents in Formatting Loops", 0, 44);
+      ctx.restore();
+
+      // Left Column: A-Plot (What the agent wrote)
+      const lSpring = spring(f, 0, 100, 12);
+      ctx.save();
+      ctx.translate(100, 135 + (1 - lSpring) * 30);
+      ctx.fillStyle = "#F8FAFC";
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, true);
+
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 16px 'Inter Tight'";
+      ctx.fillText("TASK: 'Rename parse to parse_record in utils.py'", 24, 75);
+
+      const slopLines = [
+        { diff: ' ', tokens: [{ t: "# Begin helper section", c: "#64748B" }] },
+        { diff: ' ', tokens: [{ t: "# This comment restates the line that follows it", c: "#64748B" }] },
+        { diff: '+', tokens: [{ t: "def parse_record(s):", c: "#38BDF8" }] },
+        { diff: ' ', tokens: [{ t: "    # Return the input unchanged.", c: "#64748B" }] },
+        { diff: '+', tokens: [{ t: "    return s", c: "#F59E0B" }] },
+        { diff: ' ', tokens: [{ t: "# End helper section", c: "#64748B" }] }
+      ];
+      drawCodeEditor(ctx, 24, 105, 782, 220, "utils.py", slopLines);
+
+      ctx.fillStyle = "#475569";
+      ctx.font = "500 15.5px 'Inter'";
+      ctx.fillText("Work is functionally complete, but contains redundant comment bloat.", 24, 370);
+
+      const slopProg = clamp(relT * 1.5, 0, 1);
+      drawRoughUnderline(ctx, 24, 385, 600, slopProg, "#D97706");
+      ctx.restore();
+
+      // Right Column: B-Plot (Axis Separation: Completeness != Quality)
+      const rSpring = spring(f, 8, 100, 12);
+      ctx.save();
+      ctx.translate(990, 135 + (1 - rSpring) * 30);
+      ctx.fillStyle = "#FFFBEB";
+      ctx.strokeStyle = "#D97706";
+      ctx.lineWidth = 2;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, false);
+
+      ctx.fillStyle = "#D97706";
+      ctx.font = "800 18px 'Inter Tight'";
+      ctx.fillText("JEV COMPASS: ROUTE N DECISION", 24, 75);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.font = "700 19px 'JetBrains Mono'";
+      ctx.fillText("q_pass (Completeness):", 24, 135);
+      ctx.fillStyle = "#059669";
+      ctx.fillText("p = 0.95 (PASS)", 420, 135);
+
+      ctx.fillStyle = "#1E293B";
+      ctx.fillText("label: code_slop:", 24, 190);
+      ctx.fillStyle = "#D97706";
+      ctx.fillText("p = 0.82 (NOTE)", 420, 190);
+
+      ctx.fillStyle = "#64748B";
+      ctx.font = "400 16px 'Inter'";
+      ctx.fillText("Axis Separation Principle:", 24, 260);
+      ctx.fillText("• Completeness judged ONLY on requested delivery.", 24, 295);
+      ctx.fillText("• Quality notes log to statusline and audit DB.", 24, 330);
+      ctx.fillText("• Code slop NEVER blocks the turn or triggers loops.", 24, 365);
+
+      ctx.fillStyle = "#D1FAE5";
+      roundRect(ctx, 24, 420, 782, 55, 10, true, false);
+      ctx.fillStyle = "#065F46";
+      ctx.font = "800 17px 'Inter Tight'";
+      ctx.textAlign = "center";
+      ctx.fillText("✓ TURN PASSES WITH AUDIT NOTE (NO INFINITE LOOP)", 415, 454);
+      ctx.textAlign = "left";
+      ctx.restore();
+
+      if (f > 30) {
+        drawHandwrittenNote(ctx, 1150, 690, 670, 44, "Veritasium twist: Never block on style, or agents enter infinite hallucination loops!");
+      }
+
+      ctx.restore();
+    }
+
+    // 6. A/B Clash 3: Blast Radius Radar & Fake Receipts (86 - 104s)
+    function drawScene6(t) {
+      const relT = t - 86.0;
+      const f = relT * FPS;
+
+      if (relT < 8) {
+        updateCamera(520, 440, 1.15); // Focus on Radar
+      } else {
+        updateCamera(1400, 440, 1.15); // Focus on Fake stub strike
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 2 · A/B PLOT CLASH 3 · blast_radius & faked_evidence", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("Catching Unchecked Downstream Callers & Stubbed Tests", 0, 44);
+      ctx.restore();
+
+      // Left Column: Caller Graph Radar
+      const lSpring = spring(f, 0, 100, 12);
+      ctx.save();
+      ctx.translate(100, 135 + (1 - lSpring) * 30);
+      ctx.fillStyle = "#F8FAFC";
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, true);
+
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 17px 'Inter Tight'";
+      ctx.fillText("CALLER GRAPH RADAR SCAN", 24, 75);
+
+      const cx = 415, cy = 200, r = 85;
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, r * 0.6, 0, Math.PI * 2); ctx.stroke();
+
+      const sweep = (f * 0.08) % (Math.PI * 2);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(sweep) * r, cy + Math.sin(sweep) * r);
+      ctx.strokeStyle = "#DC2626";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      if (Math.floor(sweep * 8) === 0) {
+        sfxRadarPing();
+      }
+
+      ctx.fillStyle = "#059669";
+      ctx.beginPath(); ctx.arc(cx - 40, cy - 25, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.font = "600 12px 'JetBrains Mono'";
+      ctx.fillText("sync/retry.py (tested)", cx - 145, cy - 38);
+
+      ctx.fillStyle = "#DC2626";
+      ctx.beginPath(); ctx.arc(cx + 45, cy + 30, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillText("export/pipeline.py (UNCHECKED!)", cx + 62, cy + 35);
+
+      ctx.fillStyle = "#7F1D1D";
+      ctx.font = "700 16px 'Inter'";
+      ctx.fillText("label: blast_radius_unchecked (p = 0.89)", 24, 340);
+      ctx.fillStyle = "#334155";
+      ctx.font = "400 15px 'Inter'";
+      ctx.fillText("Unit test passed, but downstream callers were never verified.", 24, 375);
+      ctx.restore();
+
+      // Right Column: Fabricated Evidence Detection
+      const rSpring = spring(f, 8, 100, 12);
+      ctx.save();
+      ctx.translate(990, 135 + (1 - rSpring) * 30);
+      ctx.fillStyle = "#FEF2F2";
+      ctx.strokeStyle = "#DC2626";
+      ctx.lineWidth = 2;
+      roundRect(ctx, 0, 0, 830, 530, 16, true, true);
+
+      drawPlotBadge(ctx, 24, 20, false);
+
+      ctx.fillStyle = "#DC2626";
+      ctx.font = "800 18px 'Inter Tight'";
+      ctx.fillText("FABRICATED EVIDENCE DETECTOR", 24, 75);
+
+      const fakeLines = [
+        { diff: ' ', tokens: [{ t: "# Agent claims: '220/220 slots pass'", c: "#64748B" }] },
+        { diff: '+', tokens: [{ t: "RESULTS = {'T1': {'ok': True}}", c: "#EF4444" }, { t: "  # placeholder stub", c: "#64748B" }] },
+        { diff: ' ', tokens: [{ t: "# Constant placeholder instead of running real evaluation", c: "#64748B" }] }
+      ];
+      drawCodeEditor(ctx, 24, 105, 782, 175, "eval_runner.py", fakeLines);
+
+      if (relT > 9.0) {
+        const strikeProg = clamp((relT - 9.0) * 2, 0, 1);
+        drawRoughStrike(ctx, 85, 235, 340, strikeProg, "#DC2626");
+      }
+
+      ctx.fillStyle = "#991B1B";
+      ctx.font = "800 19px 'JetBrains Mono'";
+      ctx.fillText("label: faked_evidence (p = 0.95)", 24, 335);
+
+      ctx.fillStyle = "#334155";
+      ctx.font = "400 15px 'Inter'";
+      ctx.fillText("• Hardcoded stub results or swallowed errors trigger hard escalate.", 24, 380);
+      ctx.fillText("• B-Plot receipt validator checks command execution vs claim.", 24, 415);
+      ctx.fillText("• Hard stop blocks false claims before code reaches staging.", 24, 450);
+      ctx.restore();
+
+      if (f > 30) {
+        drawHandwrittenNote(ctx, 1150, 690, 670, 44, "Narrow testing ignored downstream callers; stubbed constant caught by receipt audit.");
+      }
+
+      ctx.restore();
+    }
+
+    // 7. Resolution: Actionable Steering & The Clean Pass (104 - 120s)
+    function drawScene7(t) {
+      const relT = t - 104.0;
+      const f = relT * FPS;
+
+      if (relT < 7) {
+        updateCamera(520, 500, 1.15); // Focus on terminal test run
+      } else {
+        updateCamera(960, 470, 1.02); // Pull back for Clean Pass
+      }
+
+      ctx.save();
+      applyCamera(ctx);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, 1920, 1020);
+
+      // Header
+      ctx.save();
+      ctx.translate(100, 65);
+      ctx.fillStyle = "#059669";
+      ctx.font = "800 15px 'Inter Tight'";
+      ctx.fillText("ACT 3 · SELF-HEALING & THE CLEAN PASS", 0, 0);
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "900 42px 'Inter Tight'";
+      ctx.fillText("Actionable Steering Closes the Feedback Loop", 0, 44);
+      ctx.restore();
+
+      // Top Full-Width Banner: Injected Steer Message
+      const steerSpring = spring(f, 0, 100, 12);
+      ctx.save();
+      ctx.translate(100, 135 + (1 - steerSpring) * 25);
+      ctx.fillStyle = "#EFF6FF";
+      ctx.strokeStyle = "#1D4ED8";
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, 0, 0, 1720, 95, 12, true, true);
+
+      ctx.fillStyle = "#1E40AF";
+      ctx.font = "800 14px 'JetBrains Mono'";
+      ctx.fillText("HOOK INJECTED ACTIONABLE STEER TO AGENT CONTEXT:", 24, 32);
+
+      const msg = '"Change to sync/retry.py reaches export peers; receipts cover only target. Re-run checks covering affected peers."';
+      const charCount = Math.min(msg.length, Math.floor(relT * 32));
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "600 17px 'JetBrains Mono'";
+      ctx.fillText(msg.substring(0, charCount), 24, 68);
+      ctx.restore();
+
+      // Bottom Left: Agent executes complete test suite
+      if (f > 15) {
+        const blSpring = spring(f, 15, 90, 12);
+        ctx.save();
+        ctx.translate(100, 255 + (1 - blSpring) * 25);
+
+        const count = Math.min(220, Math.floor((relT - 1.5) * 35));
+        const passedSuite = count >= 220;
+
+        const terminalOutput = [
+          { text: "Executing test suite across all touched and downstream peers...", color: "#94A3B8" },
+          { text: `Running pytest: ${count}/220 passed...`, color: "#38BDF8", bold: true }
+        ];
+        if (passedSuite) {
+          terminalOutput.push({ text: "✓ 220 passed in 6.10s (PEERS FULLY VERIFIED)", color: "#10B981", bold: true });
+        }
+
+        drawMacTerminal(ctx, 0, 0, 830, 400, "zsh · executing peer verification", "pytest tests/ -q", terminalOutput, !passedSuite);
+        ctx.restore();
+      }
+
+      // Bottom Right: Re-Audit Passes Cleanly
+      if (f > 35) {
+        const brSpring = spring(f, 35, 90, 11);
+        ctx.save();
+        ctx.translate(990, 255 + (1 - brSpring) * 25);
+        ctx.fillStyle = "#F0FDF4";
+        ctx.strokeStyle = "#059669";
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, 0, 0, 830, 400, 16, true, true);
+
+        ctx.fillStyle = "#059669";
+        ctx.font = "800 18px 'Inter Tight'";
+        ctx.fillText("COMPASS RE-EVALUATION", 28, 40);
+
+        ctx.fillStyle = "#1E293B";
+        ctx.font = "700 19px 'JetBrains Mono'";
+        ctx.fillText("q_pass (Completeness):", 28, 100);
+        ctx.fillStyle = "#059669";
+        ctx.fillText("p = 0.98 (PASS)", 420, 100);
+
+        ctx.fillStyle = "#1E293B";
+        ctx.fillText("blast_radius_unchecked:", 28, 150);
+        ctx.fillStyle = "#64748B";
+        ctx.fillText("p = 0.01 (CLEAN)", 420, 150);
+
+        ctx.fillStyle = "#059669";
+        roundRect(ctx, 28, 205, 774, 150, 12, true, false);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "900 28px 'Inter Tight'";
+        ctx.fillText("✅ CLEAN PASS APPROVED", 50, 260);
+        ctx.font = "500 15px 'Inter'";
+        ctx.fillText("Turn completed with reproducible receipts and zero blind spots.", 50, 295);
+
+        if (!soundEvents.s7Chime && relT > 4.5) {
+          sfxCleanPass();
+          soundEvents.s7Chime = true;
+        }
+
+        ctx.restore();
+
+        drawHandwrittenNote(ctx, 1150, 680, 670, 44, "Veritasium resolution: The loop closes not with blind faith, but with reproducible receipts.");
+      }
+
+      ctx.restore();
+    }
+
+    // --- MAIN RENDER LOOP ---
+    function render() {
+      const now = performance.now();
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+
+      if (isPlaying) {
+        currentTime += dt * speed;
+        if (currentTime >= TOTAL_DURATION) {
+          currentTime = 0;
+          soundEvents.s4GateSlam = false;
+          soundEvents.s6Radar = false;
+          soundEvents.s7Chime = false;
+        }
+      }
+
+      if (currentTime < 16) {
+        drawScene1(currentTime);
+      } else if (currentTime < 36) {
+        drawScene2(currentTime);
+      } else if (currentTime < 52) {
+        drawScene3(currentTime);
+      } else if (currentTime < 70) {
+        drawScene4(currentTime);
+      } else if (currentTime < 86) {
+        drawScene5(currentTime);
+      } else if (currentTime < 104) {
+        drawScene6(currentTime);
+      } else {
+        drawScene7(currentTime);
+      }
+
+      updateUI();
+      requestAnimationFrame(render);
+    }
+
+    function updateUI() {
+      const activeIdx = getActiveChapterIndex();
+      const ch = CHAPTERS[activeIdx];
+
+      document.getElementById('hudKicker').textContent = ch.kicker;
+      document.getElementById('subtitleText').textContent = ch.text;
+
+      const pct = (currentTime / TOTAL_DURATION) * 100;
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('timeReadout').textContent = fmtTime(currentTime) + ' / ' + fmtTime(TOTAL_DURATION);
+
+      const f = Math.floor(currentTime * FPS);
+      document.getElementById('hudFps').textContent = `60 FPS · FRAME ${f}`;
+      document.getElementById('hudCamera').textContent = `CAM: ${camera.zoom.toFixed(2)}× (2.5D KINEMATICS)`;
+
+      document.querySelectorAll('.chapter-row').forEach((el, idx) => {
+        el.classList.toggle('active', idx === activeIdx);
+      });
+    }
+
+    function getActiveChapterIndex() {
+      let idx = 0;
+      for (let i = 0; i < CHAPTERS.length; i++) {
+        if (currentTime >= CHAPTERS[i].t) idx = i;
+      }
+      return idx;
+    }
+
+    function fmtTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function togglePlay() {
+      isPlaying = !isPlaying;
+      document.getElementById('btnPlay').textContent = isPlaying ? '❚❚' : '▶';
+      if (isPlaying && audioEnabled) getAudioContext();
+    }
+
+    function seek(e) {
+      const rect = document.getElementById('progressBar').getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      currentTime = clamp(pct * TOTAL_DURATION, 0, TOTAL_DURATION);
+      if (currentTime < 55) soundEvents.s4GateSlam = false;
+      if (currentTime < 107) soundEvents.s7Chime = false;
+      if (audioEnabled) getAudioContext();
+    }
+
+    function cycleSpeed() {
+      const SPEEDS = [1, 1.25, 1.5, 2];
+      speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+      document.getElementById('btnSpeed').textContent = speed + '×';
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 's' || e.key === 'S') cycleSpeed();
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      }
+    });
+
+    const list = document.getElementById('chapterList');
+    CHAPTERS.forEach((c, idx) => {
+      const btn = document.createElement('button');
+      btn.className = 'chapter-row' + (idx === 0 ? ' active' : '');
+      btn.innerHTML = `<span class="chapter-time">${fmtTime(c.t)}</span><span>${c.title}</span>`;
+      btn.onclick = () => {
+        currentTime = c.t;
+        if (currentTime < 55) soundEvents.s4GateSlam = false;
+        if (currentTime < 107) soundEvents.s7Chime = false;
+        if (audioEnabled) getAudioContext();
+      };
+      list.appendChild(btn);
+    });
+
+    document.addEventListener('click', () => {
+      if (audioEnabled) getAudioContext();
+    }, { once: true });
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
