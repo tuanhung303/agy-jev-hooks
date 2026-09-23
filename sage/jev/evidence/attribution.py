@@ -7,7 +7,11 @@ wins over position: parallel calls must never share receipts.
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-EXIT_RE = re.compile(r"exit[=: ]+(\d+)")
+EXIT_RE = re.compile(r"(?:exit[=: ]+|exited with code )(\d+)", re.I)
+_RECEIPT_START_RE = re.compile(
+    r"^(?:Created At:.*?\n(?:Completed At:.*?\n)?\s*)?(?:The command exited with code \d+|exit[=: ]+\d+)",
+    re.I | re.S,
+)
 
 _NON_RESULT_TYPES = {
     "USER_INPUT", "CHECKPOINT", "SUMMARY", "CONVERSATION_SUMMARY",
@@ -79,7 +83,7 @@ def _bind_result_step(
             # An ID-less output must be receipt-shaped (structured status
             # flags or a leading exit code), never prose that merely
             # mentions an exit code.
-            shaped = _status_of(step, "") != "unknown" or bool(EXIT_RE.match(raw))
+            shaped = _status_of(step, "") != "unknown" or bool(_RECEIPT_START_RE.match(raw))
             if shaped:
                 return step, raw, False
     return None, None, True

@@ -578,6 +578,7 @@ class CompassClassifyTests(unittest.TestCase):
         self.assertTrue(hint.startswith("jev_compass not_verified:"), hint)
         self.assertIn("A material outcome lacks evidence", hint)
         self.assertIn("Evidence: run_command exit=0 pytest -q", hint)
+        self.assertIn("Action: Run the primary check directly", hint)
         self.assertIn("Note: code_slop", hint)
 
     def test_hint_without_blocks_omits_evidence_segment(self):
@@ -604,6 +605,58 @@ class CompassClassifyTests(unittest.TestCase):
                 mock.patch.object(jev_compass, "jev_compass_classify") as classify:
             self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
             classify.assert_not_called()
+
+    def test_hint_skips_transcript_tail_commands(self):
+        result = {
+            "hard_escalate": ["not_verified"],
+            "fired": {"not_verified": 0.95},
+            "blocks": {
+                "command_receipts": (
+                    "=== command_receipts ===\n"
+                    "$ tail -n 2 /path/to/transcript.jsonl\n[exit=0]\n"
+                    "$ gws drive files list\n[exit=0]\n"
+                ),
+                "artifact_diffs": "",
+                "final_reply": "done",
+            },
+        }
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
+            hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
+        self.assertIn("Evidence: $ gws drive files list", hint)
+        self.assertNotIn("transcript.jsonl", hint)
+        self.assertIn("Action: Run the primary check directly", hint)
+
+    def test_hint_prioritizes_failing_command(self):
+        result = {
+            "hard_escalate": ["claim_conflict"],
+            "fired": {"claim_conflict": 0.95},
+            "blocks": {
+                "command_receipts": (
+                    "=== command_receipts ===\n"
+                    "$ git status\n[exit=0]\nclean\n\n"
+                    "$ pytest tests/\n[exit=1]\nFAILED tests/test_foo.py\n"
+                ),
+                "artifact_diffs": "",
+                "final_reply": "all green",
+            },
+        }
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
+            hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
+        self.assertIn("Evidence: [exit=1]", hint)
+        self.assertIn("Action: Reconcile the claim with observed command outputs", hint)
+
+    def test_antigravity_banner_receipt_binding(self):
+        steps = [
+            _step("USER_INPUT", "check tables"),
+            _step("PLANNER_RESPONSE", "", [_run_call("bq query")]),
+            _step("GENERIC", "Created At: 2026-09-23T17:34:55+07:00\n\nThe command exited with code 0.\nOutput:\nrow_count: 42"),
+            _step("PLANNER_RESPONSE", "tables verified"),
+        ]
+        blocks = jev_compass.assemble_evidence(steps)
+        self.assertIn("$ bq query\n[exit=0]", blocks["command_receipts"])
+        self.assertIn("row_count: 42", blocks["command_receipts"])
 
     def test_catalog_shape(self):
         self.assertEqual(len(COMPASS_CATEGORIES), 23)

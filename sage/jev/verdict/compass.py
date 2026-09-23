@@ -6,6 +6,7 @@ category-bound narratives. Evidence assembly lives in sage.jev.evidence
 """
 import http.client
 import math
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -32,10 +33,35 @@ from sage.config import COMPASS_ENABLED, JEV_GATE_API_KEY
 
 CLASSIFY_TIME_BUDGET_S = 10.0
 
+COMPASS_ACTIONS: Dict[str, str] = {
+    "not_verified": "Run the primary check directly (e.g. tests, DB/API query, file inspection) and report the actual terminal output before concluding.",
+    "claim_conflict": "Reconcile the claim with observed command outputs and fix the failing condition.",
+    "premature_stop": "Complete all feasible in-scope deliverables; do not stop early or ask if you should proceed with authorized work.",
+    "undone": "Produce the missing deliverable or perform the requested action within scope before stopping.",
+    "faked_evidence": "Run the actual command or check against the real environment; do not hardcode or mock success.",
+    "blast_radius_unchecked": "Run checks or inspect downstream peers and callers of modified files.",
+    "delivery_condition": "Monitor through completion or run an end-to-end smoke test of the journey.",
+    "tdd_breach": "Run a failing test reproducing the defect before implementing the fix.",
+    "test_integrity": "Verify check assertions, coverage, and target before accepting success.",
+    "needs_simplification": "Simplify the implementation and remove unused abstractions while preserving safeguards.",
+}
+
 
 def _evidence_snippet(blocks: Dict[str, str]) -> str:
-    """First concrete observed line: receipts beat diffs beat the reply."""
-    for name in ("command_receipts", "artifact_diffs", "final_reply"):
+    """Observed line grounding the label: failing receipts beat diffs beat replies."""
+    receipts_text = str(blocks.get("command_receipts") or "")
+    if receipts_text:
+        lines = [line.strip() for line in receipts_text.splitlines() if line.strip() and not line.startswith("=== ")]
+        for line in lines:
+            if re.search(r"\[exit=(?:[1-9]\d*|unknown|error)\]|\b(?:failed|error|fatal|exception)\b", line, re.I):
+                return line[:120]
+        for line in lines:
+            if line.startswith(("[exit=", "Created At:", "Completed At:", "Task id", "Task Description")):
+                continue
+            if "transcript.jsonl" in line or "/.system_generated/" in line:
+                continue
+            return line[:120]
+    for name in ("artifact_diffs", "final_reply"):
         for line in str(blocks.get(name) or "").splitlines():
             line = line.strip()
             if line and not line.startswith("=== "):
@@ -72,6 +98,9 @@ def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None) -> 
     snippet = _evidence_snippet(result.get("blocks") or {})
     if snippet:
         hint += f" Evidence: {snippet}"
+    action = COMPASS_ACTIONS.get(top)
+    if action:
+        hint += f" Action: {action}"
     if notes:
         hint += f" Note: {', '.join(notes)}"
     log_audit(redact_secrets(hint))
