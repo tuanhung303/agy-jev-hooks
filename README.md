@@ -26,15 +26,15 @@ Copy mode bypasses macOS TCC sandbox boundaries. The `post-commit` and `post-mer
 
 | Path | Responsibility |
 |---|---|
+| [hooks/agy-stop-audit.py](hooks/agy-stop-audit.py) | Antigravity Stop audit: native transcript replay, token drain protection, gate chain |
 | [hooks/zcode-stop-audit.py](hooks/zcode-stop-audit.py) | ZCode Stop audit: rollout replay into sage steps, gate chain |
 | [hooks/qoder-stop-audit.py](hooks/qoder-stop-audit.py) | Qoder Stop audit |
 | [hooks/hermes-stop-review.py](hooks/hermes-stop-review.py) | Hermes pre_llm_call cache + pre_verify gate |
 | [sage/jev/evidence/](sage/jev/evidence/assemble.py) | Five-block evidence assembly, redaction, blast-radius detection |
 | [sage/jev/verdict/compass.py](sage/jev/verdict/compass.py) | Jev Compass verdict, axis split, hard-label steer, fail-open handling |
 | [jev.yaml](sage/jev/jev.yaml) | Single YAML config: cases, routing (categories, axes, pairs), skill route table |
-| [hooks/qoder-stop-audit.py](hooks/qoder-stop-audit.py) | Qoder Stop audit |
 | [scripts/qoder-fork.py](scripts/qoder-fork.py) | Qoder session fork helper |
-| [hooks/sage-enforce.py](hooks/sage-enforce.py) | PreToolUse pass-through |
+| [hooks/skill-recommender.py](hooks/skill-recommender.py) | Pre-invocation skill suggestion router |
 | [hooks/command-timer.py](hooks/command-timer.py) | Command duration feedback |
 
 ## Verify

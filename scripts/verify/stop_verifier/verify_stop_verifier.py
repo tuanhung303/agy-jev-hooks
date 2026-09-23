@@ -11,6 +11,7 @@ def main() -> int:
     """Execute actual schema, provenance, artifact, and lifecycle checks in a subprocess."""
     return subprocess.run([
         sys.executable, "-m", "pytest", "-q",
+        "tests/test_agy_stop_audit_contract.py",
         "tests/test_zcode_stop_audit_contract.py", "tests/test_qoder_stop_audit_contract.py",
         "tests/test_qoder_stop_audit_jev.py", "tests/test_hermes_stop_review.py",
         "tests/test_jev_compass.py", "tests/test_jev_parser.py",

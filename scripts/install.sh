@@ -6,11 +6,12 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMER_SRC="$REPO_DIR/hooks/command-timer.py"
 STATUSLINE_SRC="$REPO_DIR/statusline/statusline.py"
 PROMPT_SRC="$REPO_DIR/sage/sage_prompt.md"
-ENFORCE_SRC="$REPO_DIR/hooks/sage-enforce.py"
+AGY_AUDIT_SRC="$REPO_DIR/hooks/agy-stop-audit.py"
 RECOMMENDER_SRC="$REPO_DIR/hooks/skill-recommender.py"
 QODER_AUDIT_SRC="$REPO_DIR/hooks/qoder-stop-audit.py"
 QODER_FORK_SRC="$REPO_DIR/scripts/qoder-fork.py"
 ZCODE_AUDIT_SRC="$REPO_DIR/hooks/zcode-stop-audit.py"
+JEVGREP_SRC="$REPO_DIR/scripts/jevgrep"
 
 MODE="symlink"
 for arg in "$@"; do
@@ -24,8 +25,8 @@ for arg in "$@"; do
   esac
 done
 
-if [[ ! -f "$ENFORCE_SRC" ]]; then
-  echo "Error: Hook file not found at $ENFORCE_SRC" >&2
+if [[ ! -f "$AGY_AUDIT_SRC" ]]; then
+  echo "Error: Hook file not found at $AGY_AUDIT_SRC" >&2
   exit 1
 fi
 
@@ -58,15 +59,15 @@ if [[ -f "$PROMPT_SRC" ]]; then
   chmod +x "$PROMPT_SRC" 2>/dev/null || true
 fi
 
-chmod +x "$ENFORCE_SRC" "$TIMER_SRC" "$STATUSLINE_SRC" "$QODER_AUDIT_SRC" "$QODER_FORK_SRC" "$ZCODE_AUDIT_SRC"
+chmod +x "$AGY_AUDIT_SRC" "$TIMER_SRC" "$STATUSLINE_SRC" "$QODER_AUDIT_SRC" "$QODER_FORK_SRC" "$ZCODE_AUDIT_SRC" "$JEVGREP_SRC"
 chmod +x "$SCRIPT_DIR/install.sh"
 if [[ -f "$SCRIPT_DIR/sync.sh" ]]; then
   chmod +x "$SCRIPT_DIR/sync.sh"
 fi
 
-echo "Installing hooks, statusline, and prompt from $REPO_DIR (mode: $MODE)..."
+echo "Installing hooks, statusline, prompt, and launchers from $REPO_DIR (mode: $MODE)..."
 
-mkdir -p "$HOME/.config/agy" "$HOME/.gemini/config/hooks" "$HOME/.qoder/hooks" "$HOME/.zcode/hooks"
+mkdir -p "$HOME/.config/agy" "$HOME/.gemini/config/hooks" "$HOME/.qoder/hooks" "$HOME/.zcode/hooks" "$HOME/.local/bin"
 
 install_file() {
   local src="$1"
@@ -85,9 +86,10 @@ install_file() {
   fi
 }
 
-# 1. sage-enforce
-install_file "$ENFORCE_SRC" "$HOME/.config/agy/sage-enforce.py" "sage-enforce.py"
-install_file "$ENFORCE_SRC" "$HOME/.gemini/config/hooks/sage-enforce.py" "sage-enforce.py (gemini hook)"
+# 1. agy-stop-audit (and clean up retired sage-enforce)
+rm -f "$HOME/.config/agy/sage-enforce.py" "$HOME/.gemini/config/hooks/sage-enforce.py"
+install_file "$AGY_AUDIT_SRC" "$HOME/.config/agy/agy-stop-audit.py" "agy-stop-audit.py"
+install_file "$AGY_AUDIT_SRC" "$HOME/.gemini/config/hooks/agy-stop-audit.py" "agy-stop-audit.py (gemini hook)"
 
 # 3. sage prompt (and legacy advisor_prompt compatibility link)
 if [[ -f "$PROMPT_SRC" ]]; then
@@ -114,6 +116,9 @@ install_file "$RECOMMENDER_SRC" "$HOME/.zcode/hooks/skill-recommender.py" "skill
 install_file "$RECOMMENDER_SRC" "$HOME/.config/agy/skill-recommender.py" "skill-recommender.py"
 install_file "$RECOMMENDER_SRC" "$HOME/.gemini/config/hooks/skill-recommender.py" "skill-recommender.py (gemini hook)"
 install_file "$RECOMMENDER_SRC" "$HOME/.qoder/hooks/skill-recommender.py" "skill-recommender.py (Qoder hook)"
+
+# 5d. jevgrep launcher
+install_file "$JEVGREP_SRC" "$HOME/.local/bin/jevgrep" "jevgrep launcher"
 
 # 6. sage package copy when mode is copy
 if [[ "$MODE" == "copy" ]]; then
@@ -142,18 +147,16 @@ if os.path.exists(hooks_path):
     except Exception:
         data = {}
 
-# session-sage (Lite Mode stop audit) is gone; drop any stale registration.
+# sage-enforce and legacy session-sage are gone; drop stale registrations.
+data.pop("sage-enforce", None)
 data.pop("session-sage", None)
 
-# Ensure sage-enforce is registered
-data["sage-enforce"] = {
-    "PreToolUse": [{
-        "matcher": "*",
-        "hooks": [{
-            "type": "command",
-            "command": f"python3 {os.path.expanduser('~/.config/agy/sage-enforce.py')} pre_tool",
-            "timeout": 5
-        }]
+# Ensure agy-stop-audit is registered on Stop event
+data["agy-stop-audit"] = {
+    "Stop": [{
+        "type": "command",
+        "command": f"python3 {os.path.expanduser('~/.config/agy/agy-stop-audit.py')}",
+        "timeout": 30
     }]
 }
 
@@ -312,5 +315,5 @@ if [[ -n "$GIT_DIR" && -d "$GIT_DIR/hooks" ]]; then
 fi
 
 echo "Verifying installation targets:"
-ls -l "$HOME/.config/agy/sage-enforce.py" "$HOME/.gemini/config/hooks/sage-enforce.py" "$HOME/.gemini/config/hooks/command-timer.py" "$HOME/.config/agy/statusline.py" "$HOME/.qoder/hooks/qoder-stop-audit.py" "$HOME/.qoder/hooks/qoder-fork.py" "$HOME/.zcode/hooks/zcode-stop-audit.py" "$HOME/.zcode/hooks/skill-recommender.py"
+ls -l "$HOME/.config/agy/agy-stop-audit.py" "$HOME/.gemini/config/hooks/agy-stop-audit.py" "$HOME/.gemini/config/hooks/command-timer.py" "$HOME/.config/agy/statusline.py" "$HOME/.qoder/hooks/qoder-stop-audit.py" "$HOME/.qoder/hooks/qoder-fork.py" "$HOME/.zcode/hooks/zcode-stop-audit.py" "$HOME/.zcode/hooks/skill-recommender.py"
 echo "Installation complete."

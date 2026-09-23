@@ -33,8 +33,19 @@ MAX_STEERS_PER_SESSION = 2
 MAX_ATTEMPT = 3                 # pre_verify attempt cap (loop guard)
 MAX_PROMPT_CHARS = 4000
 MAX_HISTORY_CHARS = 60000       # tail budget for the cached transcript
-STEER_TEXT_LIMIT = 400
+STEER_TEXT_LIMIT = 1200
 GATE_SCRIPT = HOOK_DIR / "qoder-stop-audit.py"
+
+
+def clamp_steer(hint, limit=STEER_TEXT_LIMIT):
+    """Clamp steer text to limit, preserving word boundaries when truncated."""
+    if not hint or len(hint) <= limit:
+        return hint or ""
+    truncated = hint[:limit - 3]
+    last_space = truncated.rfind(" ")
+    if last_space > limit // 2:
+        return truncated[:last_space] + "..."
+    return hint[:limit]
 
 
 def log(message):
@@ -204,7 +215,7 @@ def review_phase(payload):
         log(f"PASS session={session_id} attempt={attempt}")
         return {}
     bump_steer_count(session_id)
-    steer = hint[:STEER_TEXT_LIMIT]
+    steer = clamp_steer(hint, STEER_TEXT_LIMIT)
     log(f"BLOCK session={session_id} attempt={attempt}: {steer[:200]}")
     return {"decision": "block", "reason": steer}
 

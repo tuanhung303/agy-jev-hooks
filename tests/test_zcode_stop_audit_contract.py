@@ -159,7 +159,7 @@ class GateOrderTests(HookContractTestCase):
     """Claim contract outranks Compass; both feed the same steer channel."""
 
     def test_claim_hint_wins_and_bounds_text(self):
-        self.claims_mock.return_value = "jev_compass not_verified: claim" + " x" * 500
+        self.claims_mock.return_value = "jev_compass not_verified: claim" + " x" * 800
         code, err = self.run_main(self.payload())
         self.assertEqual(code, 2)
         steer = err.strip()

@@ -31,10 +31,21 @@ SNIPPET_LIMIT = 1200
 # Wall-clock budget for the Compass pre-gate; nothing else runs after it.
 JEV_GATE_BUDGET_SECONDS = 8.0
 # Cap the injected steer text so ZCode never receives an unbounded message.
-STEER_TEXT_LIMIT = 400
+STEER_TEXT_LIMIT = 1200
 # Singleton skill content needs room; still bounded.
 SKILL_TEXT_LIMIT = 3000
 MAX_STEPS = 400
+
+
+def clamp_steer(hint, limit=STEER_TEXT_LIMIT):
+    """Clamp steer text to limit, preserving word boundaries when truncated."""
+    if not hint or len(hint) <= limit:
+        return hint or ""
+    truncated = hint[:limit - 3]
+    last_space = truncated.rfind(" ")
+    if last_space > limit // 2:
+        return truncated[:last_space] + "..."
+    return hint[:limit]
 
 
 def _ensure_sage_path():
@@ -317,7 +328,7 @@ def main():
         hint = casual_restyle_hint(reply)
         tag, limit = "CASUAL", STEER_TEXT_LIMIT
     if hint:
-        action = hint[:limit] or "Unsupported claim suspected: run the exact check yourself."
+        action = clamp_steer(hint, limit) or "Unsupported claim suspected: run the exact check yourself."
         bump_steer_count(session_id)
         log(f"{tag} session={session_id}: {action[:200]}")
         sys.stderr.write(f"[zcode-stop-audit] {action}\n")
