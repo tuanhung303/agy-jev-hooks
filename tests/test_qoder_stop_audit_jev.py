@@ -226,6 +226,20 @@ class CasualRestyleTests(unittest.TestCase):
         self.assertIn("[@bro](skill://bro)", err)
         self.assertIn("[qoder-stop-audit]", err)
 
+    def test_restyle_carries_the_ste100_method(self):
+        # Robotic replies are standardized on ASD-STE100, not on a vague
+        # "be concise": keyword and rules ride the steer as a singleton, so the
+        # agent never fetches or explores anything.
+        code, err = self._run("Certainly! I hope this helps with your project.")
+        self.assertEqual(code, 2)
+        self.assertIn("ASD-STE100", err)
+        self.assertIn("Simplified Technical English", err)
+        self.assertIn("active voice", err)
+        self.assertIn("max 20 words", err)
+        self.assertIn("Do not redo any work", err)
+        self.assertNotIn("http", err)
+        self.assertLessEqual(len(err), self.hook.STEER_TEXT_LIMIT + len("[qoder-stop-audit] \n") + 1)
+
     def test_verbose_reply_gets_bro_restyle(self):
         code, err = self._run(" ".join(["plain"] * 250))
         self.assertEqual(code, 2)

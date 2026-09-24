@@ -2,15 +2,23 @@
 sage.casual - Casual category: robotic or verbose reply detection.
 
 Style-only check for the stop gate. It never questions the work, only how
-the reply reads; the steer points at the bro skill so the agent restates the
-same answer instead of redoing it.
+the reply reads; the steer points at the bro skill and the ASD-STE100
+Simplified Technical English rules so the agent restates the same answer
+instead of redoing it.
 """
 import re
 from typing import Optional
 
+# ASD-STE100 is the shared keyword for a robotic-reply rewrite: a controlled
+# language (ASD Issue 9, 53 rules) that removes the ambiguity a plain "be
+# concise" leaves open. The rules ride the steer inline, like every other hint;
+# the full standard lives in the installed `asd-ste100` skill.
 RESTYLE_HINT = (
-    "[@bro](skill://bro) restyle: your reply reads robotic or verbose. "
-    "Restate the same answer plainly and concisely, human to human. "
+    "[@bro](skill://bro) restyle. Keyword: ASD-STE100 (Simplified Technical English). "
+    "Your reply reads robotic or verbose. Restate the same answer in STE: "
+    "one meaning per word; active voice; simple tenses, no -ing verbs; "
+    "one instruction per sentence; max 20 words, 25 in description; "
+    "no semicolons; no dropped words. Keep every fact, path and receipt. "
     "Do not redo any work."
 )
 
