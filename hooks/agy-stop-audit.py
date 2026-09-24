@@ -81,6 +81,25 @@ except Exception:
         return None
 
 try:
+    from sage.sanitizer import redact_secrets as _redact_secrets
+except Exception:
+    _redact_secrets = None
+
+
+def emit_steer(hint, limit=STEER_TEXT_LIMIT):
+    """Sanitize once, then bound: logging and the caller get one string.
+
+    A missing or failing sanitizer is a silent exit, never an unsanitized steer.
+    """
+    if _redact_secrets is None:
+        return None
+    try:
+        safe = _redact_secrets(hint)
+    except Exception:
+        return None
+    return clamp_steer(safe, limit)
+
+try:
     from sage.transcript import _read_transcript_steps, get_transcript_path, is_explicit_user_input
 except Exception:
     def _read_transcript_steps(path):
@@ -255,9 +274,13 @@ def main():
         tag, limit = "CASUAL", STEER_TEXT_LIMIT
 
     if hint:
-        action = clamp_steer(hint, limit) or "Unsupported claim suspected: run the exact check yourself."
+        action = emit_steer(hint, limit)
+        if not action:
+            log(f"{tag} suppressed: sanitizer unavailable or failed")
+            sys.stdout.write(json.dumps({}))
+            return 0
         bump_steer_count(session_id)
-        log(f"{tag} session={session_id}: {action[:200]}")
+        log(f"{tag} session={session_id}: {action}")
         sys.stdout.write(json.dumps({
             "decision": "continue",
             "reason": f"[agy-stop-audit] {action}"

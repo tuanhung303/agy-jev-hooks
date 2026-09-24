@@ -73,6 +73,25 @@ except Exception:
     def claim_contract_hint_for(reply, transcript_path):
         return None
 
+try:
+    from sage.sanitizer import redact_secrets as _redact_secrets
+except Exception:
+    _redact_secrets = None
+
+
+def emit_steer(hint, limit=STEER_TEXT_LIMIT):
+    """Sanitize once, then bound: logging, stderr and the caller get one string.
+
+    A missing or failing sanitizer is a silent exit, never an unsanitized steer.
+    """
+    if _redact_secrets is None:
+        return None
+    try:
+        safe = _redact_secrets(hint)
+    except Exception:
+        return None
+    return clamp_steer(safe, limit)
+
 
 def log(message):
     try:
@@ -195,9 +214,12 @@ def main():
         hint = casual_restyle_hint(reply)
         tag, limit = "CASUAL", STEER_TEXT_LIMIT
     if hint:
-        action = clamp_steer(hint, limit) or "Unsupported claim suspected: run the exact check yourself."
+        action = emit_steer(hint, limit)
+        if not action:
+            log(f"{tag} suppressed: sanitizer unavailable or failed")
+            return 0
         bump_steer_count(session_id)
-        log(f"{tag} session={session_id}: {action[:200]}")
+        log(f"{tag} session={session_id}: {action}")
         sys.stderr.write(f"[qoder-stop-audit] {action}\n")
         return 2
     log(f"PASS session={session_id}")

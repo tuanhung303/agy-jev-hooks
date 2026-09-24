@@ -115,5 +115,135 @@ class HintShapeTests(unittest.TestCase):
         self.assertIsNone(claims.claim_contract_hint("Done. Tests pass.", []))
 
 
+class NonAssertionTests(unittest.TestCase):
+    """Quoted rehearsal, fixtures, and hedged statements are not claims.
+
+    Fixtures are the four adjudicated CLAIM-miss turns of 2026-09-24 whose
+    reply carried a claim phrase that was never asserted about this turn.
+    """
+
+    def test_reported_fixture_claim_never_fires(self):
+        # 4d5822fe t1: the phrase describes a synthetic transcript, not this work.
+        reply = ('- FAIL path: synthetic transcript claim "All 22 tests passed, '
+                 'deployment verified" → exit 2 với action cụ thể (đòi chạy pytest lấy số thật, '
+                 'đối chiếu bundle production).')
+        self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_video_script_beat_never_fires(self):
+        # 41d09cbe t15: storyboard line with a hold time and node flow.
+        reply = ('**5. 3:26-4:25, hold 8s** · "Tests pass" → receipt → sync/retry.py → '
+                 'hai node đỏ "no receipt covers it" → review. Đúng hình anh thích, làm cao trào.')
+        self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_quoted_narration_negation_never_fires(self):
+        # 41d09cbe t15: the narration itself says the phrase may not settle anything.
+        reply = ('> "...follow the changed file\'s connections. Two neighboring files have no '
+                 'receipts covering them. That does not prove they are broken. It shows why '
+                 "'tests pass' may not settle whether the work is finished.\"")
+        self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_frame_description_never_fires(self):
+        # 41d09cbe t16: animation frames, beats, and a node graph.
+        reply = ('- Mắt thường hai frame: beat 5 ra đúng cú pháp graph anh thích, "Tests pass" → '
+                 'receipt → `sync/retry.py` xanh → hai node "no receipt covers it" đỏ → review. '
+                 'Beat 4 mở từ đúng một node nhỏ "the message".')
+        self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_reported_speech_never_fires(self):
+        # 41d09cbe t29: "when the agent says ...", a description of the gate.
+        reply = ('- Khi agent nói "Tests pass", stop verifier xét completion theo receipts, hard '
+                 'finding thì chặn stop và bảo cần xem gì; Jev lỗi thì thả stop (fail-open)')
+        self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_negated_and_future_statements_never_fire(self):
+        for reply in ("We have not deployed this yet.",
+                      "Sẽ deploy sau khi anh duyệt xong.",
+                      "Tests pass chưa chắc đủ, cần xem receipt."):
+            with self.subTest(reply=reply):
+                self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_assertion_claims_skips_rehearsal(self):
+        self.assertEqual(claims.assertion_claims('Script beat 3: "tests pass" → receipt'), [])
+        self.assertEqual(claims.assertion_claims("443 test pass, đã deploy."),
+                         ["443 test pass, đã deploy."])
+
+
+class RunnerSummaryTests(unittest.TestCase):
+    """A pass-count summary counts; a wrapper's exit token never does."""
+
+    def test_piped_suite_summary_covers(self):
+        # a648129b t9 / 8a5fd354 t6: `| tail` hides exit=0, the summary stands.
+        steps = [_call("run_command",
+                       {"command": "python3 -m pytest tests/ -q 2>&1 | tail -4 && uv run ruff check"}, "c1"),
+                 _out("c1", "....................... [100%]\n443 passed, 512 subtests passed in 4.46s")]
+        self.assertEqual(claims.uncovered_claims("**Chứng cứ** — 443 test pass, lint sạch.", steps), [])
+
+    def test_runner_json_summary_covers(self):
+        # 90e27469 t14: npm test and a smoke gate report counts, not exit codes.
+        steps = [_call("run_command", {"command": "npm test 2>&1 | tail -8"}, "c1"),
+                 _out("c1", "# tests 1345\n# pass 1345\n# fail 0\n# duration_ms 44726"),
+                 _call("run_command", {"command": "npm run test:smoke-static 2>&1 | tail -6"}, "c2"),
+                 _out("c2", "# pass 37\n# fail 0\n# duration_ms 14159")]
+        reply = "Đã kiểm tra trên localhost, typecheck sạch, 1345 test pass, smoke gate 37/37."
+        self.assertEqual(claims.uncovered_claims(reply, steps), [])
+
+    def test_wrapper_exit_token_does_not_cover_a_failing_suite(self):
+        # `pytest ... | tail` exits 0 while the runner reports failures.
+        steps = [_call("run_command", {"command": "python3 -m pytest tests/ -q 2>&1 | tail -3"}, "c1"),
+                 _out("c1", "exit=0\nFAILED tests/test_skillpack.py::SkillPackTests\n"
+                            "1 failed, 442 passed, 512 subtests passed in 4.26s")]
+        gaps = claims.uncovered_claims("443 test pass.", steps)
+        self.assertIn("test claim", gaps[0])
+
+    def test_failing_count_beside_passing_count_never_covers(self):
+        steps = [_call("run_command", {"command": "npm test"}, "c1"),
+                 _out("c1", "# pass 1345\n# fail 2")]
+        self.assertIn("test claim", claims.uncovered_claims("1345 test pass.", steps)[0])
+
+
+class ClaimScopeTests(unittest.TestCase):
+    """Receipts must cover the claimed target, not just any run of that kind."""
+
+    def test_scoped_test_receipt_for_another_file_does_not_cover(self):
+        steps = [_call("run_command", {"command": "python3 -m pytest tests/test_other.py -q"}, "c1"),
+                 _out("c1", "5 passed in 0.04s")]
+        gaps = claims.uncovered_claims("Đã sửa `sync/retry.py` xong, tests pass.", steps)
+        self.assertIn("test claim", gaps[0])
+
+    def test_matching_test_file_covers(self):
+        steps = [_call("run_command", {"command": "python3 -m pytest tests/test_claims.py -q"}, "c1"),
+                 _out("c1", "24 passed in 0.08s")]
+        self.assertEqual(claims.uncovered_claims("Đã sửa `sage/claims.py`, tests pass.", steps), [])
+
+    def test_whole_suite_run_covers_any_target(self):
+        steps = [_call("run_command", {"command": "python3 -m pytest tests/ -q"}, "c1"),
+                 _out("c1", "443 passed, 512 subtests passed in 4.26s")]
+        self.assertEqual(claims.uncovered_claims("Đã sửa `sage/claims.py`, tests pass.", steps), [])
+
+    def test_deploy_receipt_for_another_host_does_not_cover(self):
+        steps = [_call("run_command", {"command": "curl -s https://other.example.com/health"}, "d1"),
+                 _out("d1", "{\"status\":\"ok\"}")]
+        gaps = claims.uncovered_claims("Deployed to https://staging.example.com", steps)
+        self.assertIn("deploy claim", gaps[0])
+
+    def test_deploy_receipt_for_the_claimed_host_covers(self):
+        steps = [_call("run_command", {"command": "curl -s https://staging.example.com/health"}, "d1"),
+                 _out("d1", "{\"status\":\"ok\"}")]
+        self.assertEqual(claims.uncovered_claims("Deployed to https://staging.example.com", steps), [])
+
+    def test_unrelated_url_receipt_does_not_cover_deploy_claim(self):
+        # 8a5fd354 t7/t8: a fetched skill URL is not a deploy check.
+        steps = [{"type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                    {"name": "fetch", "id": "f1",
+                     "args": {"url": "https://raw.githubusercontent.com/some/repo/main/SKILL.md"}}]},
+                 _out("f1", "# Caveman skill\nCompress output.")]
+        gaps = claims.uncovered_claims("Đã deploy hooks xong.", steps)
+        self.assertIn("deploy claim", gaps[0])
+
+    def test_mere_screenshot_mention_is_not_a_visual_claim(self):
+        self.assertEqual(
+            claims.uncovered_claims("Em xem screenshot anh gửi, ảnh không có gì sai.", [{}]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -211,6 +211,39 @@ class DecisionContractTests(HookContractTestCase):
         self.assertIn("a machine artifact", out.get("reason", ""))
 
 
+class SteerSanitizationTests(HookContractTestCase):
+    """One sanitized string is logged and emitted; sanitizer failure is silent."""
+
+    def test_secret_never_reaches_reason_or_log(self):
+        secret = "SYNTHETIC_CANARY_" + "z" * 24
+        self.gate_mock.return_value = f"not_verified: check it Evidence: password:{secret}"
+        code, out = self.run_main(self.payload())
+        reason = out.get("reason", "")
+        self.assertNotIn(secret, reason)
+        self.assertIn("[redacted]", reason)
+        action = reason[len("[agy-stop-audit] "):]
+        logged = self.hook.LOG_PATH.read_text()
+        self.assertNotIn(secret, logged)
+        self.assertIn(action, logged)
+
+    def test_sanitizer_failure_abstains_silently(self):
+        sid = "test-session-sanitizer-fail"
+        self.gate_mock.return_value = "not_verified: check it"
+        with mock.patch.object(self.hook, "_redact_secrets", side_effect=RuntimeError("boom")):
+            code, out = self.run_main(self.payload(conversationId=sid))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, {})
+        self.assertFalse((self.state_dir / f"{sid}.steers").exists())
+        self.assertIn("suppressed", self.hook.LOG_PATH.read_text())
+
+    def test_missing_sanitizer_abstains_silently(self):
+        self.gate_mock.return_value = "not_verified: check it"
+        with mock.patch.object(self.hook, "_redact_secrets", None):
+            code, out = self.run_main(self.payload())
+        self.assertEqual(code, 0)
+        self.assertEqual(out, {})
+
+
 class TranscriptExtractionTests(unittest.TestCase):
     """Native Antigravity transcript step extraction."""
 

@@ -25,6 +25,7 @@ from sage.jev.evidence.assemble import (  # noqa: F401  (re-exported for callers
 from sage.jev.request.parser import build_request
 from sage.jev.request.prompt_pair import extract_prompt_pair
 from sage.jev.transport import _call_jev
+from sage.jev.verdict.support import label_support
 from sage.locking import log_audit
 from sage.sanitizer import redact_secrets
 from sage.user_context import has_stated_requirement
@@ -47,35 +48,15 @@ COMPASS_ACTIONS: Dict[str, str] = {
 }
 
 
-def _evidence_snippet(blocks: Dict[str, str]) -> str:
-    """Observed line grounding the label: failing receipts beat diffs beat replies."""
-    receipts_text = str(blocks.get("command_receipts") or "")
-    if receipts_text:
-        lines = [line.strip() for line in receipts_text.splitlines() if line.strip() and not line.startswith("=== ")]
-        for line in lines:
-            if re.search(r"\[exit=(?:[1-9]\d*|unknown|error)\]|\b(?:failed|error|fatal|exception)\b", line, re.I):
-                return line[:120]
-        for line in lines:
-            if line.startswith(("[exit=", "Created At:", "Completed At:", "Task id", "Task Description")):
-                continue
-            if "transcript.jsonl" in line or "/.system_generated/" in line:
-                continue
-            return line[:120]
-    for name in ("artifact_diffs", "final_reply"):
-        for line in str(blocks.get(name) or "").splitlines():
-            line = line.strip()
-            if line and not line.startswith("=== "):
-                return line[:120]
-    return ""
-
-
 def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None) -> Optional[str]:
-    """Single actionable steer: top hard label + its criterion + one evidence line.
+    """Single actionable steer: top supported hard label + criterion + evidence.
 
     Nonbinding by design: hard-escalate labels focus the caller's inspection
     (it may reject them); remaining hard labels and quality notes go to the
     audit log, notes also ride the tail so the caller's length cap trims them
-    first. Never blocks; None on any failure.
+    first. A hard label whose support cannot be composed locally is dropped and
+    the next is tried; when none qualifies the whole steer is suppressed.
+    Never blocks; None on any failure.
     """
     if not COMPASS_ENABLED or not JEV_GATE_API_KEY:
         return None
@@ -91,20 +72,35 @@ def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None) -> 
         log_audit(f"jev_compass: no hard labels fired (notes: {', '.join(notes) or 'none'}"
                   + (f"; axes {by_axis}" if by_axis else "") + ")")
         return None
-    top = max(hard, key=lambda cat: result["fired"].get(cat, 0.0))
+    blocks = result.get("blocks") or {}
+    fired = result.get("fired") or {}
+    log_audit(f"jev_compass hard: {', '.join(hard)}")
+    top = None
+    support = None
+    for label in sorted(hard, key=lambda cat: -fired.get(cat, 0.0)):
+        support = label_support(label, blocks)
+        if support:
+            top = label
+            break
+    if not support:
+        log_audit("jev_compass: no hard label carried local support; steer suppressed")
+        return None
+    log_audit(f"jev_compass top={top} axis={axis_of(top) or 'unknown'}")
     spec = COMPASS_CATEGORIES.get(top) or {}
-    log_audit(f"jev_compass hard: {', '.join(hard)}; top={top} axis={axis_of(top) or 'unknown'}")
     hint = f"jev_compass {top}: {spec.get('criterion', '')}".strip()
-    snippet = _evidence_snippet(result.get("blocks") or {})
-    if snippet:
-        hint += f" Evidence: {snippet}"
+    hint += f" Evidence: {support}"
     action = COMPASS_ACTIONS.get(top)
     if action:
         hint += f" Action: {action}"
     if notes:
         hint += f" Note: {', '.join(notes)}"
-    log_audit(redact_secrets(hint))
-    return hint
+    try:
+        safe = redact_secrets(hint)
+    except Exception:
+        log_audit("jev_compass: sanitizer failed; steer suppressed")
+        return None
+    log_audit(safe)
+    return safe
 
 
 def _valid_probability(answer: Any) -> Optional[float]:

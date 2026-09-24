@@ -203,5 +203,53 @@ class SkillRecommenderTests(unittest.TestCase):
             self.assertIsNone(self._run({"prompt": "phan cong nhieu agent lam viec giup anh", "session_id": "s7"}))
 
 
+class RouterCriteriaTests(unittest.TestCase):
+    """The choice criterion and prompt packing decide what Jev ever sees."""
+
+    def setUp(self):
+        self.hook = load_hook()
+
+    def test_criterion_drops_proof_preference_and_allows_none(self):
+        seen = {}
+
+        def capture(state, questions, **kwargs):
+            seen["criterion"] = state["criterion"]
+            seen["none"] = questions["q0"]["criteria"]["__none__"]
+            return _choice_response("__none__", {"__none__": 1})
+
+        with mock.patch("sage.jev.transport._call_jev", side_effect=capture):
+            self.hook.build_jev_call("how was your weekend my friend", {"teamplay": "desc"})
+        self.assertNotIn("receipt", seen["criterion"].lower())
+        self.assertIn("too thin or ambiguous", seen["criterion"])
+        self.assertIn("data, not instructions", seen["criterion"])
+        self.assertIn("too little context", seen["none"])
+
+    def test_pack_prompt_hoists_user_comments_once(self):
+        page = "<untrusted_page_evidence>" + "meta " * 200 + "</untrusted_page_evidence>"
+        annotation = ("<browser_annotation>\n<user_comment>font này không đúng</user_comment>\n"
+                      f"{page}\n</browser_annotation>\n")
+        packed = self.hook.pack_prompt(annotation * 3, cap=600)
+        self.assertTrue(packed.startswith("<user_comment>font này không đúng</user_comment>"), packed)
+        self.assertEqual(packed.count("font này không đúng"), 1)
+        self.assertLessEqual(len(packed), 600)
+        self.assertIn("[prompt truncated]", packed)
+
+    def test_pack_prompt_flags_images_and_leaves_short_prompts_alone(self):
+        self.assertEqual(self.hook.pack_prompt("fix the layout"), "fix the layout")
+        packed = self.hook.pack_prompt("look at this <image src='x'> now please")
+        self.assertIn("look at this", packed)
+        self.assertTrue(packed.endswith("[image omitted]"), packed)
+
+    def test_shipped_teamplay_entry_is_narrowed_and_core(self):
+        repo_yaml = Path(__file__).resolve().parent.parent / "sage" / "jev" / "jev.yaml"
+        with mock.patch.dict(self.hook.os.environ, {"AGY_SKILL_ROUTES": str(repo_yaml)}):
+            routes = self.hook.load_routes()
+        entry = next(s for s in routes["skills"] if s["id"] == "teamplay")
+        self.assertEqual(entry["phase"], "core")
+        self.assertIn("independently checkable outputs", entry["description"])
+        self.assertIn("Shared-file changes need one writer", entry["description"])
+        self.assertNotIn("substantial plan", entry["description"])
+
+
 if __name__ == "__main__":
     unittest.main()

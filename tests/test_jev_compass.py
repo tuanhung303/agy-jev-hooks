@@ -105,6 +105,27 @@ class CompassEvidenceTests(unittest.TestCase):
         blocks = jev_compass.assemble_evidence(steps)
         self.assertEqual(blocks["command_receipts"], "<no commands run>")
 
+    def test_receipt_tail_keeps_whole_lines_and_marks_omissions(self):
+        # Status and body stay on separate lines, and an older receipt's tail
+        # cut lands on a line boundary with an explicit marker.
+        steps = [
+            _step("USER_INPUT", "run the suite twice"),
+            _step("PLANNER_RESPONSE", "", [_run_call("make old-suite", cid="o1")]),
+            _output("exit=0\n" + "old line\n" * 200, cid="o1"),
+            _step("PLANNER_RESPONSE", "", [_run_call("make new-suite", cid="n1")]),
+            _output("exit=unknown\n" + "new line\n" * 200, cid="n1"),
+        ]
+        blocks = jev_compass.assemble_evidence(steps)
+        receipts = blocks["command_receipts"]
+        self.assertIn("$ make old-suite\n[exit=0]\n", receipts)
+        self.assertNotIn("[exit=0]old", receipts)
+        self.assertNotIn("[exit=unknown]new", receipts)
+        self.assertIn("chars omitted ...]", receipts)
+        tail = receipts.split("chars omitted ...]", 1)[1]
+        kept = [line for line in tail.split("\n\n")[0].splitlines() if line.strip()]
+        self.assertTrue(kept, receipts)
+        self.assertTrue(all(line == "old line" for line in kept), kept)
+
     def test_ambiguous_output_marked(self):
         steps = [
             _step("USER_INPUT", "run both suites"),
@@ -569,42 +590,58 @@ class CompassClassifyTests(unittest.TestCase):
     def test_hint_is_top_label_with_criterion_and_evidence(self):
         result = {"hard_escalate": ["not_verified", "undone"], "notes": ["code_slop"],
                   "fired": {"not_verified": 0.9, "undone": 0.8, "code_slop": 0.75},
-                  "blocks": {"command_receipts": "=== command_receipts ===\n"
-                             "run_command exit=0 pytest -q",
-                             "artifact_diffs": "", "final_reply": "done"}}
+                  "blocks": {"command_receipts": "$ ls -la /w/out\n[exit=0]\n- nothing here",
+                             "artifact_diffs": "",
+                             "final_reply": "Deployed to https://app.example.com"}}
         with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
                 mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
         self.assertTrue(hint.startswith("jev_compass not_verified:"), hint)
         self.assertIn("A material outcome lacks evidence", hint)
-        self.assertIn("Evidence: run_command exit=0 pytest -q", hint)
+        self.assertIn("Evidence: final_reply claims \"Deployed to https://app.example.com\"", hint)
+        self.assertIn("no captured receipt or diff covers https://app.example.com", hint)
         self.assertIn("Action: Run the primary check directly", hint)
         self.assertIn("Note: code_slop", hint)
 
-    def test_hint_without_blocks_omits_evidence_segment(self):
-        result = {"hard_escalate": ["undone"], "notes": [],
-                  "fired": {"undone": 0.9}}
+    def test_unsupported_label_is_dropped_and_next_tried(self):
+        # A hard label with no locally composed support is not emitted as a bare
+        # allegation, and the next supported label takes its place.
+        result = {"hard_escalate": ["data_integrity", "not_verified"], "notes": [],
+                  "fired": {"data_integrity": 0.95, "not_verified": 0.9},
+                  "blocks": {"command_receipts": "$ ls -la /w/out\n[exit=0]\n- nothing here",
+                             "artifact_diffs": "",
+                             "final_reply": "Deployed to https://app.example.com"}}
         with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
                 mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
-        self.assertTrue(hint.startswith("jev_compass undone:"), hint)
-        self.assertNotIn("Evidence:", hint)
+        self.assertTrue(hint.startswith("jev_compass not_verified:"), hint)
+        self.assertNotIn("data_integrity", hint)
 
-    def test_hint_none_without_hard_labels(self):
-        result = {"hard_escalate": [], "notes": ["code_slop"], "fired": {"code_slop": 0.8}}
+    def test_hint_without_blocks_suppresses_the_steer(self):
+        # No evidence blocks means no support: the whole steer is suppressed.
+        result = {"hard_escalate": ["undone"], "notes": [], "fired": {"undone": 0.9}}
         with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
                 mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
 
-    def test_hint_disabled_or_keyless_skips_classify(self):
-        with mock.patch.object(jev_compass, "COMPASS_ENABLED", False), \
-                mock.patch.object(jev_compass, "jev_compass_classify") as classify:
+    def test_unknown_status_and_bare_error_marker_never_support(self):
+        # Observed junk: [exit=unknown] beside "except Exception:" is not a failure.
+        result = {"hard_escalate": ["not_verified"], "notes": [], "fired": {"not_verified": 0.9},
+                  "blocks": {"command_receipts": "$ grep -n prefetch ~/.qoder/settings.json\n"
+                                               "[exit=unknown]\nexcept Exception:",
+                             "artifact_diffs": "", "final_reply": "Settings cleaned up."}}
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
-            classify.assert_not_called()
-        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", ""), \
-                mock.patch.object(jev_compass, "jev_compass_classify") as classify:
+
+    def test_empty_capture_never_establishes_absence(self):
+        # Truncated or absent capture cannot prove the work is missing.
+        result = {"hard_escalate": ["not_verified"], "notes": [], "fired": {"not_verified": 0.9},
+                  "blocks": {"command_receipts": "<no commands run>", "artifact_diffs": "",
+                             "final_reply": "Đã cập nhật hooks/qoder-stop-audit.py."}}
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
-            classify.assert_not_called()
 
     def test_hint_skips_transcript_tail_commands(self):
         result = {
@@ -613,17 +650,17 @@ class CompassClassifyTests(unittest.TestCase):
             "blocks": {
                 "command_receipts": (
                     "=== command_receipts ===\n"
-                    "$ tail -n 2 /path/to/transcript.jsonl\n[exit=0]\n"
-                    "$ gws drive files list\n[exit=0]\n"
+                    "$ tail -n 2 /path/to/transcript.jsonl\n[exit=0]\n...\n\n"
+                    "$ gws drive files list\n[exit=0]\nfile-a\n"
                 ),
                 "artifact_diffs": "",
-                "final_reply": "done",
+                "final_reply": "Đã cập nhật hooks/qoder-stop-audit.py.",
             },
         }
         with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
                 mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
-        self.assertIn("Evidence: $ gws drive files list", hint)
+        self.assertIn("no captured receipt or diff covers hooks/qoder-stop-audit.py", hint)
         self.assertNotIn("transcript.jsonl", hint)
         self.assertIn("Action: Run the primary check directly", hint)
 
@@ -644,8 +681,48 @@ class CompassClassifyTests(unittest.TestCase):
         with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
                 mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
             hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
-        self.assertIn("Evidence: [exit=1]", hint)
+        self.assertIn("Evidence: command_receipts: $ pytest tests/ [exit=1] -> FAILED tests/test_foo.py", hint)
         self.assertIn("Action: Reconcile the claim with observed command outputs", hint)
+
+    def test_returned_hint_is_redacted_once_and_logged_identically(self):
+        secret = "SYNTHETIC_CANARY_" + "z" * 32
+        result = {"hard_escalate": ["not_verified"], "notes": [], "fired": {"not_verified": 0.9},
+                  "blocks": {"command_receipts": f"$ deploy.sh\n[exit=0]\npassword:{secret}",
+                             "artifact_diffs": "",
+                             "final_reply": "Đã deploy hooks/secret-notes.md."}}
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result), \
+                mock.patch.object(jev_compass, "log_audit") as audit:
+            hint = jev_compass.jev_compass_hint("/tmp/x.jsonl")
+        self.assertIsNotNone(hint)
+        self.assertNotIn(secret, hint)
+        self.assertEqual(audit.call_args.args[0], hint)
+
+    def test_sanitizer_failure_suppresses_the_steer(self):
+        result = {"hard_escalate": ["not_verified"], "notes": [], "fired": {"not_verified": 0.9},
+                  "blocks": {"command_receipts": "$ ls\n[exit=0]\nx",
+                             "artifact_diffs": "",
+                             "final_reply": "Đã deploy hooks/out.md."}}
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result), \
+                mock.patch.object(jev_compass, "redact_secrets", side_effect=RuntimeError("boom")):
+            self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
+
+    def test_hint_none_without_hard_labels(self):
+        result = {"hard_escalate": [], "notes": ["code_slop"], "fired": {"code_slop": 0.8}}
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", "k"), \
+                mock.patch.object(jev_compass, "jev_compass_classify", return_value=result):
+            self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
+
+    def test_hint_disabled_or_keyless_skips_classify(self):
+        with mock.patch.object(jev_compass, "COMPASS_ENABLED", False), \
+                mock.patch.object(jev_compass, "jev_compass_classify") as classify:
+            self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
+            classify.assert_not_called()
+        with mock.patch.object(jev_compass, "JEV_GATE_API_KEY", ""), \
+                mock.patch.object(jev_compass, "jev_compass_classify") as classify:
+            self.assertIsNone(jev_compass.jev_compass_hint("/tmp/x.jsonl"))
+            classify.assert_not_called()
 
     def test_antigravity_banner_receipt_binding(self):
         steps = [

@@ -83,6 +83,23 @@ def _read_steps_bounded(path: str) -> List[Dict[str, Any]]:
     return _BoundedSteps(parsed, omitted)
 
 
+def _tail_lines(body: str, cap: int) -> str:
+    """Bound a body to the cap at a line boundary; a partial first line is
+    dropped and the omission is marked, so a receipt can never end mid-token."""
+    tail = body[-cap:]
+    cut = tail.find("\n")
+    if cut != -1:
+        tail = tail[cut + 1:]
+    marker = f"[... {len(body) - len(tail)} chars omitted ...]"
+    room = max(0, cap - len(marker) - 1)
+    if len(tail) > room:
+        tail = tail[len(tail) - room:]
+        cut = tail.find("\n")
+        if cut != -1:
+            tail = tail[cut + 1:]
+    return f"{marker}\n{tail}"
+
+
 def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
     """Build the five delimited evidence blocks with identity-bound receipts."""
     omitted_bytes = getattr(steps, "omitted_bytes", 0)
@@ -191,7 +208,7 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
     rendered_receipts = []
     for pos, (header, body) in enumerate(receipts):
         cap = RECEIPT_FULL_CHARS if pos == len(receipts) - 1 else RECEIPT_TAIL_CHARS
-        rendered_receipts.append(header + (body if len(body) <= cap else body[-cap:]))
+        rendered_receipts.append(header + "\n" + (body if len(body) <= cap else _tail_lines(body, cap)))
     # Label-matched evidence for blast_radius_unchecked: deterministic AST
     # consumer gap, bounded and fail-open (no guaranteed workspace root here).
     try:

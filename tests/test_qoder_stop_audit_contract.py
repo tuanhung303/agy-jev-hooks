@@ -169,6 +169,48 @@ class SteerCapTests(HookContractTestCase):
             (self.state_dir / f"{session}.steers").read_text(), "1")
 
 
+class SteerSanitizationTests(HookContractTestCase):
+    """One sanitized string is logged, emitted, and returned; failure is silent."""
+
+    def test_secret_never_reaches_stderr_or_log(self):
+        secret = "SYNTHETIC_CANARY_" + "z" * 24
+        self.gate_mock.return_value = f"not_verified: check it Evidence: password:{secret}"
+        code, err = self.run_main(self.payload())
+        self.assertEqual(code, 2)
+        self.assertNotIn(secret, err)
+        self.assertIn("[redacted]", err)
+        action = err.strip()[len("[qoder-stop-audit] "):]
+        logged = self.hook.LOG_PATH.read_text()
+        self.assertNotIn(secret, logged)
+        self.assertIn(action, logged)
+
+    def test_sanitizer_failure_exits_silently(self):
+        session = self.payload()["session_id"]
+        self.gate_mock.return_value = "not_verified: check it"
+        with mock.patch.object(self.hook, "_redact_secrets", side_effect=RuntimeError("boom")):
+            code, err = self.run_main(self.payload())
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertFalse((self.state_dir / f"{session}.steers").exists())
+        self.assertIn("suppressed", self.hook.LOG_PATH.read_text())
+
+    def test_missing_sanitizer_exits_silently(self):
+        self.gate_mock.return_value = "not_verified: check it"
+        with mock.patch.object(self.hook, "_redact_secrets", None):
+            code, err = self.run_main(self.payload())
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+
+    def test_blank_hint_after_sanitization_is_suppressed(self):
+        session = self.payload()["session_id"]
+        self.gate_mock.return_value = "   "
+        with mock.patch.object(self.hook, "_redact_secrets", side_effect=lambda text: ""):
+            code, err = self.run_main(self.payload())
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertFalse((self.state_dir / f"{session}.steers").exists())
+
+
 class TranscriptSnippetsTests(unittest.TestCase):
     """last_turn_snippets must pull the last human prompt + last reply."""
 

@@ -576,7 +576,7 @@ skills:
       description: Pick this when the user asks to search, read, retrieve, or explicitly post within Slack and the workspace or thread is established by the request or trusted context.
       phase: core
     - id: teamplay
-      description: Pick this when the request splits into two or more independent workstreams (research, review, build) worth running in parallel under one lead, or when the user wants a substantial plan coordinated through ownership, dependencies, shared context, and integrated verification.
+      description: Pick teamplay only when visible requested work supports at least two substantial, independently checkable outputs that can progress concurrently with separate ownership. Shared-file changes need one writer; review-before-build alone does not qualify.
       phase: core
     - id: tdd
       description: Pick this when the user requests test-first work or a reproducible bug fix with a clear inexpensive test path that can demonstrate failure before the fix and success afterward.
