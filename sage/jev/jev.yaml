@@ -150,6 +150,7 @@ routing:
     max_chars: 4000
     exclude_prefixes:
       - '[qoder-stop-audit]'
+      - '[claude-stop-audit]'
       - '[qoder-fork-audit]'
       - '[memory-prefetch]'
       - '※ skill suggestion:'
@@ -160,6 +161,7 @@ routing:
       - hermes.pre_llm_call
     compass:
       - qoder.Stop
+      - claude.Stop
       - hermes.pre_verify
       - agy.lite_stop
     verifier:

@@ -133,7 +133,9 @@ def detect_blast_radius_gap(
         for cc in code_consumers:
             cc_base = os.path.basename(cc)
             cc_stem = os.path.splitext(cc_base)[0]
-            is_inspected = cc in inspected_files or cc_base in inspected_files
+            # Harnesses log absolute read paths; consumers are workspace-relative.
+            is_inspected = cc in inspected_files or cc_base in inspected_files or any(
+                str(p).endswith("/" + cc) for p in inspected_files)
             is_executed = any(
                 cc in cmd or cc_base in cmd or cc_stem in cmd for cmd in executed_commands
             )

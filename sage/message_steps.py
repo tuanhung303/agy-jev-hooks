@@ -35,6 +35,12 @@ def normalize_message_step(step: Dict[str, Any]) -> List[Dict[str, Any]]:
     if role not in ("user", "assistant"):
         return [step]
     ts = step.get("created_at") or step.get("timestamp")
+    # Claude writes skill bodies and attachment captions as isMeta user
+    # records, and task notifications with a non-human origin.kind: neither is
+    # a user turn boundary.
+    meta = step.get("isMeta") is True
+    origin = step.get("origin")
+    injected = isinstance(origin, dict) and bool(origin.get("kind")) and origin.get("kind") != "human"
     calls: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
     texts: List[str] = []
@@ -48,18 +54,21 @@ def normalize_message_step(step: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "args": block.get("input") or block.get("args") or {},
             })
         elif kind == "tool_result":
-            results.append({
+            result = {
                 "type": "TOOL_OUTPUT",
                 "content": _result_text(block.get("content")),
                 "tool_call_id": block.get("tool_use_id") or block.get("id") or "",
                 "created_at": ts,
-            })
+            }
+            if block.get("is_error") is True:
+                result["is_error"] = True
+            results.append(result)
         elif kind == "image":
             source = block.get("source") or {}
             data = source.get("data") if isinstance(source, dict) else None
             if isinstance(data, str) and data and len(images) < MAX_IMAGES_PER_MESSAGE:
                 images.append(data)
-        elif kind in ("text", "output_text"):
+        elif kind in ("text", "output_text") and not (meta and role == "user"):
             text = str(block.get("text") or "").strip()
             if text:
                 texts.append(text)
@@ -73,6 +82,9 @@ def normalize_message_step(step: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append(step_out)
     elif texts:
         step_out = {"type": "USER_INPUT", "content": "\n".join(texts), "created_at": ts}
+        if injected:
+            step_out["source"] = "SYSTEM"
+            step_out["origin"] = origin
         if images:
             step_out["images"] = images
         out.append(step_out)

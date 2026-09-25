@@ -32,7 +32,7 @@ from sage.jev.evidence.redact import REDACT_TIME_BUDGET_S, _RedactBudget, _redac
 WRITE_TOOLS = {
     "write_to_file", "replace_file_content", "multi_replace_file_content",
     "edit_file", "create_file", "apply_diff", "patch", "modify_file", "write_file",
-    "write", "edit", "multiedit", "notebook_edit",
+    "write", "edit", "multiedit", "notebook_edit", "notebookedit",
 }
 FULL_WRITE_TOOLS = {"write_to_file", "create_file", "write_file", "write"}
 RUN_TOOLS = {"run_command", "bash", "exec", "terminal"}

@@ -108,7 +108,7 @@ def is_steering_message(content):
     )
     if any(s.startswith(p) for p in prefixes):
         return True
-    markers = ("go signal rejected", "stop hook blocked termination", "you are a strict, objective", "[reviewer agent", "[reviewer steering", "[reviewer steer", "[verifier", "[advisor", "[sage")
+    markers = ("go signal rejected", "stop hook blocked termination", "you are a strict, objective", "[reviewer agent", "[reviewer steering", "[reviewer steer", "[verifier", "[advisor", "[sage", "[claude-stop-audit")
     return any(m in s for m in markers)
 
 

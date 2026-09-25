@@ -29,6 +29,7 @@ CMD_ARG_KEYS: Tuple[str, ...] = (
 READ_TOOLS: Set[str] = {
     "view_file", "read_file", "cat", "open_file", "read_url_content",
     "read_browser_page", "read_resource", "list_dir", "find_by_name", "grep_search",
+    "read", "grep", "glob",
 }
 
 _PATH_TOOLS = READ_TOOLS | {
