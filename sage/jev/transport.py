@@ -64,7 +64,11 @@ def _call_jev(
         req.add_header("ai-evaluation-model-specification-version", _SPEC_VERSION)
         req.add_header("ai-model-id", JEV_GATE_MODEL_ID)
         try:
-            with urllib.request.urlopen(req, timeout=attempt_timeout) as resp:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            timeout = attempt_timeout if remaining is None else min(attempt_timeout, remaining)
+            if timeout <= 0:
+                raise TimeoutError("Jev deadline exhausted")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             remaining = None if deadline is None else deadline - time.monotonic()

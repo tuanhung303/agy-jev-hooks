@@ -30,6 +30,7 @@ Copy mode bypasses macOS TCC sandbox boundaries. The `post-commit` and `post-mer
 | [hooks/zcode-stop-audit.py](hooks/zcode-stop-audit.py) | ZCode Stop audit: rollout replay into sage steps, gate chain |
 | [hooks/qoder-stop-audit.py](hooks/qoder-stop-audit.py) | Qoder Stop audit |
 | [hooks/claude-stop-audit.py](hooks/claude-stop-audit.py) | Claude Code Stop audit: claim contract on edit turns plus Compass, shadow log by default (`CLAUDE_STOP_AUDIT_MODE=block` to steer) |
+| [hooks/claude-edit-guard.py](hooks/claude-edit-guard.py) | Claude Code PostToolUse edit signals for test tampering, shallow tests, and source placeholders |
 | [hooks/hermes-stop-review.py](hooks/hermes-stop-review.py) | Hermes pre_llm_call cache + pre_verify gate |
 | [sage/jev/evidence/](sage/jev/evidence/assemble.py) | Five-block evidence assembly, redaction, blast-radius detection |
 | [sage/jev/verdict/compass.py](sage/jev/verdict/compass.py) | Jev Compass verdict, axis split, hard-label steer, fail-open handling |
