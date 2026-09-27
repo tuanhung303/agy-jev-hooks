@@ -330,6 +330,10 @@ def resolve_scoped_profile(anchor: str, scope, env: Optional[dict] = None):
     """Resolve one profile for all anchor-relative scope entries and rebase them."""
     if not isinstance(scope, list) or not scope or not all(isinstance(entry, str) and entry for entry in scope):
         return None
+    # Scope is repository-relative; joining an absolute entry would drop the
+    # anchor and silently rebase it. Leave it for the engine to reject.
+    if any(os.path.isabs(entry) for entry in scope):
+        return None
 
     resolved_profiles = set()
     absolute_paths = []

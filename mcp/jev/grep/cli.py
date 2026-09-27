@@ -123,14 +123,23 @@ def command_inspect(args) -> int:
 
 
 def command_search(args) -> int:
+    scope = sorted(set(args.scope)) if args.scope else None
     try:
-        loaded = _load(args)
+        # Same routing as the MCP server: a scope under a nested, more specific
+        # profile (for example tmp/worktrees) searches with that profile.
+        scoped = None if args.config or not scope else resolve_scoped_profile(
+            os.getcwd(), scope, env=dict(os.environ))
+        if scoped is not None:
+            profile_path, scope = scoped
+            loaded = load_configuration(profile_path)
+        else:
+            loaded = _load(args)
     except ConfigurationError as cause:
         _emit_error(cause.code)
         return 2
     request = {"query": args.query}
-    if args.scope:
-        request["scope"] = sorted(set(args.scope))
+    if scope:
+        request["scope"] = scope
     if args.max_context_tokens:
         request["max_context_tokens"] = args.max_context_tokens
     if args.allow_partial_scan:

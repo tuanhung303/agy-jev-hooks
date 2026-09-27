@@ -334,6 +334,9 @@ def inventory_scope(root: AuthorizedRoot, scope: Tuple[str, ...], options: Inven
                 continue
             reason = _excluded_ancestor(rules, stack, resolved.relative_path, False)
             if reason is not None:
+                # A refused scope entry still counts as discovered, or the
+                # report claims more exclusions than files seen.
+                accumulator.discovered += 1
                 accumulator.excluded.append(ExcludedEntry(resolved.relative_path, reason, False))
                 continue
             _consider_file(root, accumulator, rules, stack, name, resolved.relative_path,
@@ -349,6 +352,7 @@ def inventory_scope(root: AuthorizedRoot, scope: Tuple[str, ...], options: Inven
             continue
         reason = _excluded_ancestor(rules, inherited, resolved.relative_path or ".", True)
         if reason is not None:
+            accumulator.discovered += 1
             accumulator.excluded.append(ExcludedEntry(resolved.relative_path, reason, True))
             continue
         _walk_directory(root, accumulator, rules, inherited, options, relative_directory)

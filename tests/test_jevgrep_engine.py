@@ -182,3 +182,24 @@ def test_small_response_budget_drops_ranges_but_keeps_report(project):
     validate_search_result(result)
     measured = result["report"]["response_budget"]["requested_tokens"]
     assert measured == 1_024
+
+
+@pytest.mark.parametrize("scope", [["tmp/wt"], ["logs"], ["tmp/wt/probe.py"], ["src", "tmp/wt"]])
+def test_scope_inside_a_denied_directory_reports_instead_of_crashing(project, scope):
+    repo = project["repository_root"]
+    os.makedirs(os.path.join(repo, "tmp", "wt"))
+    os.makedirs(os.path.join(repo, "logs"))
+    with open(os.path.join(repo, ".jevgrepignore"), "w", encoding="utf-8") as handle:
+        handle.write("tmp/**\n")
+    with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8") as handle:
+        handle.write("logs/\n")
+    for relative in ("tmp/wt/probe.py", "logs/probe.py"):
+        with open(os.path.join(repo, relative), "w", encoding="utf-8") as handle:
+            handle.write("def probe():\n    return 1\n")
+    provider = ScriptedProvider(keyword="probe")
+    result = SearchEngine(project, provider=provider).search({"query": "probe", "scope": scope})
+    outcome = result["outcome"]
+    validate_search_result(outcome)
+    assert not any(excerpt["path"].startswith(("tmp/", "logs/")) for excerpt in outcome["excerpts"])
+    excluded = outcome["report"]["files"]["excluded_by_reason"]
+    assert excluded.get("jevgrepignored", 0) + excluded.get("gitignored", 0) >= 1
