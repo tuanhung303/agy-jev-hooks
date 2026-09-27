@@ -100,7 +100,7 @@ class SearchEngine:
             logger=self._logger or SearchLogger("silent"),
         )
         try:
-            return self._run(request, context)
+            return self._run(request, context, invocation.get("fragment_filter"))
         except (RequestValidationError, ConfigurationError, ResponseBudgetError,
                 UnauthorizedPathError, ProviderError) as cause:
             code = _error_code_of(cause)
@@ -109,7 +109,7 @@ class SearchEngine:
         except ContractValidationError:
             raise  # a contract failure later in the pipeline is a defect, stay loud
 
-    def _run(self, raw_request, context: SearchContext) -> dict:
+    def _run(self, raw_request, context: SearchContext, fragment_filter=None) -> dict:
         config = self._configuration["config"]
         try:
             request = parse_search_request(raw_request, ResponseLimits(
@@ -142,6 +142,11 @@ class SearchEngine:
 
         # A lost authorization cannot become permission to send an earlier partial snapshot.
         root.assert_current()
+
+        # In-process callers (the grep filter hook) may narrow evaluation to a
+        # candidate subset; the report's fragment total then counts that subset.
+        if fragment_filter is not None:
+            prepared.fragments = [fragment for fragment in prepared.fragments if fragment_filter(fragment)]
 
         if not prepared.inventory.complete:
             context.add_stop_reason("INVENTORY_INCOMPLETE")
@@ -423,7 +428,10 @@ class SearchEngine:
             "attempts": usage.attempts,
         })
         return {"outcome": rendered["result"], "measured_tokens": rendered["measured_tokens"],
-                "search_id": context.search_id}
+                "search_id": context.search_id,
+                # Every evaluated fragment, beyond the response budget, for in-process rankers.
+                "fragment_scores": sorted((entry.fragment.path, entry.fragment.start_line,
+                                           entry.fragment.end_line, entry.score) for entry in scored)}
 
 
 def _singleton_batch(query: str, fragment: PreparedFragment):

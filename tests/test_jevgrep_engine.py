@@ -203,3 +203,22 @@ def test_scope_inside_a_denied_directory_reports_instead_of_crashing(project, sc
     assert not any(excerpt["path"].startswith(("tmp/", "logs/")) for excerpt in outcome["excerpts"])
     excluded = outcome["report"]["files"]["excluded_by_reason"]
     assert excluded.get("jevgrepignored", 0) + excluded.get("gitignored", 0) >= 1
+
+
+def test_fragment_filter_scores_only_kept_fragments(project):
+    """The grep filter hook narrows evaluation to fragments that contain a match."""
+    seen_paths = set()
+
+    class RecordingProvider(ScriptedProvider):
+        def evaluate_batch(self, batch, is_cancelled=None, timeout_s=None):
+            seen_paths.update(item.path for item in batch.items)
+            return super().evaluate_batch(batch, is_cancelled, timeout_s)
+
+    engine = SearchEngine(project, provider=RecordingProvider())
+    result = engine.search({"query": "where is session expiry handled?"},
+                           {"fragment_filter": lambda fragment: fragment.path == "src/handler.py"})
+    validate_search_result(result["outcome"])
+    assert seen_paths == {"src/handler.py"}
+    assert [entry[0] for entry in result["fragment_scores"]] == ["src/handler.py"]
+    assert result["fragment_scores"][0][3] == 0.9
+    assert result["outcome"]["report"]["fragments"]["total"] == 1
