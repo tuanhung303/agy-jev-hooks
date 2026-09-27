@@ -63,7 +63,7 @@ def test_resolve_scoped_profile_does_not_rebase_absolute_entries(tmp_path):
     assert resolve_scoped_profile(str(repo), [str(nested / "branch" / "src")], env=env) is None
 
 
-def test_cli_search_routes_a_nested_scope_like_the_mcp_server(tmp_path, monkeypatch, capsys):
+def test_cli_search_routes_a_nested_scope_to_its_profile(tmp_path, monkeypatch, capsys):
     import json
 
     from mcp.jev.grep import cli

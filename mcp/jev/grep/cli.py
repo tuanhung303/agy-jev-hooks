@@ -1,4 +1,6 @@
-"""Thin CLI over the shared engine (init, doctor, inspect, search, cache, mcp).
+"""Thin CLI over the shared engine (init, doctor, inspect, search, cache).
+
+The stdio MCP server was retired on 2026-09-28; its code is in archive/jevgrep-mcp/.
 
 Exit codes: 0 complete, 2 rejected or invalid request/config, 3 partial,
 4 fatal runtime failure, 130 interrupted. Results to stdout, diagnostics to
@@ -166,79 +168,6 @@ def command_cache(args) -> int:
     return 0
 
 
-def command_mcp(args) -> int:
-    from .mcp_server import run_mcp_server
-    engine = None
-    try:
-        loaded = _load(args)
-        engine = SearchEngine(loaded, env=dict(os.environ))
-    except ConfigurationError:
-        pass
-
-    def profile_for(path: str) -> Optional[str]:
-        try:
-            return find_profile_for(cwd=path, env=dict(os.environ))
-        except ConfigurationError:
-            return None
-
-    def engine_for(profile_path: str) -> Optional[SearchEngine]:
-        try:
-            return SearchEngine(load_configuration(profile_path), env=dict(os.environ))
-        except ConfigurationError:
-            return None
-
-    def resolve_engine(context: dict, arguments: dict):
-        """Pick the engine for one call: a request scope may name a subtree
-        with its own, more specific authorization (for example a nested
-        worktree profile carved out from a broader deny rule at the anchor),
-        so this re-resolves per call instead of caching one engine for the
-        life of the process. An explicit --config always wins: it names one
-        profile for the whole process, never subject to auto-discovery."""
-        if args.config:
-            return SearchEngine(_load(args), env=dict(os.environ)), arguments
-
-        from urllib.parse import unquote, urlparse
-
-        anchor = None
-        root_uri = context.get("root_uri")
-        if root_uri and isinstance(root_uri, str):
-            parsed_path = unquote(urlparse(root_uri).path)
-            if parsed_path and os.path.isdir(parsed_path):
-                anchor = parsed_path
-        if anchor is None:
-            for folder in context.get("workspace_folders") or []:
-                uri = folder.get("uri") if isinstance(folder, dict) else None
-                if uri:
-                    folder_path = unquote(urlparse(uri).path)
-                    if folder_path and os.path.isdir(folder_path):
-                        anchor = folder_path
-                        break
-        if anchor is None:
-            anchor = context.get("startup_cwd") or os.getcwd()
-
-        scope = arguments.get("scope") if isinstance(arguments, dict) else None
-        scoped = resolve_scoped_profile(anchor, scope, env=dict(os.environ))
-        if scoped is not None:
-            profile_path, rebased_scope = scoped
-            scoped_engine = engine_for(profile_path)
-            if scoped_engine is not None:
-                return scoped_engine, {**arguments, "scope": rebased_scope}
-            raise ConfigurationError(
-                "INVALID_CONFIG",
-                f"the authorized profile for this scope ({profile_path}) failed to load")
-
-        anchor_profile = profile_for(anchor)
-        if anchor_profile is not None:
-            anchor_engine = engine_for(anchor_profile)
-            if anchor_engine is not None:
-                return anchor_engine, arguments
-
-        return SearchEngine(_load(args), env=dict(os.environ)), arguments
-
-    run_mcp_server(engine, sys.stdin, sys.stdout, sys.stderr, __version__, engine_resolver=resolve_engine)
-    return 0
-
-
 def _emit_error(code: str) -> None:
     from .contracts import create_search_error
     from .search_response import to_cli_search_response
@@ -282,9 +211,6 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--config")
     cache.set_defaults(func=command_cache)
 
-    mcp = sub.add_parser("mcp", help="run the stdio MCP server")
-    mcp.add_argument("--config")
-    mcp.set_defaults(func=command_mcp)
     return parser
 
 

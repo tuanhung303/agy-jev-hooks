@@ -1,7 +1,7 @@
 #!/bin/bash
 # jevgrep launcher: repo checkout, key overlay, python entry.
 # Sources the local key env and maps it onto the provider variable names the
-# profiles expect, so MCP clients inherit credentials without storing them.
+# profiles expect, so the CLI finds credentials without storing them.
 set -euo pipefail
 
 REPO="/Users/__blitzzz/Documents/GitHub/agy-jev-hooks"
