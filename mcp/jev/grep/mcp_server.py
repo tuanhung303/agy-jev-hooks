@@ -8,6 +8,7 @@ queued search, then BUSY. A cancelled call never produces a later result.
 Closing stdin ends the process cleanly.
 """
 import json
+import os
 import sys
 import threading
 import uuid
@@ -72,12 +73,12 @@ class _ActiveCall:
 def run_mcp_server(engine: Optional[SearchEngine] = None, input_stream: IO[str] = sys.stdin,
                    output: IO[str] = sys.stdout, error_output: IO[str] = sys.stderr,
                    server_version: str = "", on_close: Optional[Callable[[], None]] = None,
-                   engine_resolver: Optional[Callable[[dict], SearchEngine]] = None) -> None:
+                   engine_resolver: Optional[Callable[[dict, dict], tuple[SearchEngine, dict]]] = None) -> None:
     from .config import ConfigurationError
     from .lifecycle import Clock
     fallback_clock = Clock()
     resolved_engine = [engine]
-    workspace_context: dict = {}
+    workspace_context: dict = {"startup_cwd": os.getcwd()}
     lock = threading.Lock()
     active: Dict[str, _ActiveCall] = {}
     state = {"running": None, "queued": None}  # type: ignore
@@ -110,13 +111,23 @@ def run_mcp_server(engine: Optional[SearchEngine] = None, input_stream: IO[str] 
 
     def execute(call: _ActiveCall) -> None:
         try:
-            active_engine = resolved_engine[0]
-            if active_engine is None and engine_resolver is not None:
-                active_engine = engine_resolver(workspace_context)
-                resolved_engine[0] = active_engine
+            active_engine = None
+            active_arguments = call.arguments
+            if engine_resolver is not None:
+                # Re-resolve every call: a call's own scope may name a subtree
+                # authorized by a different, more specific profile than the
+                # one that fit at startup or at the last call. Never cache
+                # this across calls, or a later, differently-scoped request
+                # would keep reusing a profile picked for an earlier one.
+                try:
+                    active_engine, active_arguments = engine_resolver(workspace_context, call.arguments)
+                except ConfigurationError:
+                    active_engine = None
+            if active_engine is None:
+                active_engine = resolved_engine[0]
             if active_engine is None:
                 raise ConfigurationError("INVALID_CONFIG", "no authorized JevGrep profile could be resolved")
-            result = active_engine.search(call.arguments, {
+            result = active_engine.search(active_arguments, {
                 "cancel_event": call.cancel_event, "started_at_ms": call.started_at_ms,
                 "search_id": None,
             })

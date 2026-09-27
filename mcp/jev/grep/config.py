@@ -326,6 +326,41 @@ def find_profile_for(cwd: Optional[str] = None, env: Optional[dict] = None) -> s
     return best_path
 
 
+def resolve_scoped_profile(anchor: str, scope, env: Optional[dict] = None):
+    """Resolve one profile for all anchor-relative scope entries and rebase them."""
+    if not isinstance(scope, list) or not scope or not all(isinstance(entry, str) and entry for entry in scope):
+        return None
+
+    resolved_profiles = set()
+    absolute_paths = []
+    for entry in scope:
+        candidate = os.path.normpath(os.path.join(anchor, entry))
+        try:
+            profile_path = find_profile_for(cwd=candidate, env=env)
+        except ConfigurationError:
+            return None
+        resolved_profiles.add(profile_path)
+        absolute_paths.append(candidate)
+
+    if len(resolved_profiles) != 1:
+        return None
+
+    profile_path = next(iter(resolved_profiles))
+    try:
+        loaded = load_configuration(profile_path, env=env)
+    except ConfigurationError:
+        return None
+
+    repository_root = loaded["repository_root"]
+    rebased = []
+    for absolute in absolute_paths:
+        relative = os.path.relpath(absolute, repository_root)
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+            return None
+        rebased.append(relative.replace(os.sep, "/"))
+    return profile_path, rebased
+
+
 def _read_env_file(path: str) -> dict:
     values = {}
     try:
