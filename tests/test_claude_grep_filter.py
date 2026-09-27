@@ -162,9 +162,11 @@ def test_few_files_and_shadow_mode_leave_output_alone(repo, provider, monkeypatc
     assert output is None and event["outcome"] == "few_files"
     monkeypatch.setattr(hook, "MODE", "shadow")
     output, event = hook.run(_payload(root, transcript, glob="*"))
-    assert output is None and event["outcome"] == "shadow_would_filter"
+    assert output is None and event["outcome"] == "shadow_ranked"
+    assert event["ranked"][0] == ["src/rules.py", 0.9] and event["hidden_files"] == 9
+    assert not hook._seen_marker(_payload(root, transcript, glob="*")).exists()  # no repeat bypass armed
     output, event = hook.run(_payload(root, transcript, glob="*.md"))
-    assert output is None and event["outcome"] == "none_relevant"
+    assert output is None and event["outcome"] == "shadow_ranked" and event["kept_files"] == 0
 
 
 def test_over_budget_search_fails_open_without_sending(repo, provider, monkeypatch):
@@ -183,16 +185,19 @@ def test_main_fails_open_on_errors(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_task_comes_from_the_last_real_prompt(tmp_path):
+def test_task_comes_from_the_recent_real_prompts(tmp_path):
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("\n".join(json.dumps(entry) for entry in [
+        {"type": "user", "message": {"content": "too old"}},
+        {"type": "user", "message": {"content": "oldest question"}},
         {"type": "user", "message": {"content": "old question"}},
         {"type": "user", "message": {"content": "<system-reminder>x</system-reminder>new question"}},
         {"type": "user", "message": {"content": [{"type": "tool_result", "content": "noise"}]}},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "grepping now"},
                                                       {"type": "tool_use", "id": "t1"}]}},
     ]), encoding="utf-8")
-    assert hook.task_from_transcript(str(transcript), "t1") == ("new question", "grepping now")
+    # The last three prompts, newest last: a bare "yes, do it" keeps the ones that say what the work is.
+    assert hook.task_from_transcript(str(transcript), "t1") == ("oldest question\n\nold question\n\nnew question", "grepping now")
 
 
 def test_cover_respects_the_scope_entry_limit():
@@ -295,3 +300,215 @@ def test_nothing_to_hide_is_a_plain_pass_through(repo, monkeypatch):
     output, event = hook.run(_payload(root, transcript))
     assert output is None and event["outcome"] == "all_relevant"
     assert not hook._seen_marker(_payload(root, transcript)).exists()
+
+
+# Bash: plain rg / grep commands get the same filter.
+
+def _bash_payload(root, transcript, command, stdout=None):
+    names = sorted([f"docs/note{i}.md" for i in range(9)] + ["src/rules.py", "tmp/scratch.py"])
+    if stdout is None:
+        stdout = "".join(f"{name}:1:Enterprise\n" for name in names)
+    return {"session_id": "sess", "tool_use_id": "tool-1", "transcript_path": str(transcript),
+            "cwd": str(root), "tool_name": "Bash", "tool_input": {"command": command, "description": "search"},
+            "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False, "isImage": False}}
+
+
+@pytest.mark.parametrize("command, args, paths", [
+    ("rg -n Enterprise src", ["-e", "Enterprise"], ["src"]),
+    ("rg -i Enterprise 2>/dev/null", ["-i", "-e", "Enterprise"], ["."]),
+    ("rg -tpy -g '!tests/**' -C3 foo", ["-t", "py", "-g", "!tests/**", "-e", "foo"], ["."]),
+    ("grep -rn 'a\\|b(c)' docs", ["--no-ignore", "--hidden", "-e", "a|b\\(c\\)"], ["docs"]),
+    ("grep -rniE 'a|b' --include=*.py .", ["--no-ignore", "--hidden", "--ignore-case", "--glob", "*.py", "-e", "a|b"],
+     ["."]),
+    ("fgrep -rl a.b .", ["--no-ignore", "--hidden", "--fixed-strings", "-e", "a.b"], ["."]),
+    ("rg -e one -e two src docs", ["-e", "one", "-e", "two"], ["src", "docs"]),
+])
+def test_bash_search_mirrors_plain_search_commands(tmp_path, command, args, paths):
+    parsed_args, parsed_paths, cwd, _, truncated = hook.bash_search(command, str(tmp_path))
+    assert truncated is False
+    assert parsed_args == args
+    assert parsed_paths == [str(tmp_path / path) if path != "." else str(tmp_path) for path in paths]
+    assert cwd == str(tmp_path)
+
+
+@pytest.mark.parametrize("command", [
+    "ls -la", "rg foo | wc -l", "rg foo > out.txt", "rg foo; echo done", "rg -c foo", "rg -v foo",
+    "grep -rh foo .", "rg -r bar foo", "rg --heading foo", "rg -I foo", "git grep foo", "rg 'unclosed",
+    "cd src && rg foo && ls", "rg", "rg foo | head -5 | sort", "rg foo | grep -v bar",
+])
+def test_bash_search_leaves_anything_it_cannot_mirror(tmp_path, command):
+    assert hook.bash_search(command, str(tmp_path)) is None
+
+
+def test_bash_search_follows_a_leading_cd(tmp_path):
+    (tmp_path / "sub dir").mkdir()
+    _, paths, cwd, _, _ = hook.bash_search(f"cd '{tmp_path}/sub dir' && rg -n foo", "/")
+    assert cwd == paths[0] == str(tmp_path / "sub dir")
+
+
+def test_bash_filters_rg_output(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "BASH_MIN_BYTES", 0)
+    output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise"))
+    specific = output["hookSpecificOutput"]
+    assert event["outcome"] == "filtered" and event["tool"] == "Bash"
+    updated = specific["updatedToolOutput"]
+    assert set(updated) == {"stdout", "stderr", "interrupted", "isImage"}
+    assert updated["stdout"] == "src/rules.py:1:Enterprise\ntmp/scratch.py:1:Enterprise\n"
+    assert "rerun the identical command" in specific["additionalContext"]
+    # The repeat is keyed on the command, not on Claude's free-text description.
+    again = _bash_payload(root, transcript, "rg -n -i Enterprise")
+    again["tool_input"]["description"] = "search again"
+    assert hook.run(again) == (None, {"session": "sess", "mode": "filter", "tool": "Bash",
+                                      "matched_files": 11, "outcome": "repeat_unfiltered"})
+
+
+def test_bash_small_output_is_not_worth_a_round_trip(repo, provider):
+    root, transcript = repo
+    output, event = hook.run(_bash_payload(root, transcript, "rg -i Enterprise"))
+    assert output is None and event["outcome"] == "small_output"
+    assert provider.sent_paths == set()
+
+
+def test_non_search_bash_is_not_logged(monkeypatch, capsys):
+    logged = []
+    monkeypatch.setattr(hook, "_log", logged.append)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {"stdout": "a\n"}})))
+    assert hook.main() == 0
+    assert json.loads(capsys.readouterr().out) == {} and logged == []
+
+
+def test_bash_output_paths_resolve_in_every_printed_form(tmp_path):
+    hide, keep = str(tmp_path / "a.py"), str(tmp_path / "a.py-old")
+    stdout = "\n".join([
+        "a.py:1:x", "./a.py-2-context", f"{hide}:3:y", "--", "a.py-old:1:x", "a.py-old-2-z:w", "--",
+        "a.py", "a.py-old", ""])
+    updated = hook.filtered_bash_response({"stdout": stdout, "stderr": ""}, {hide}, {hide, keep}, str(tmp_path))
+    assert updated["stdout"] == "a.py-old:1:x\na.py-old-2-z:w\n--\na.py-old\n"
+
+
+def test_hint_mode_ranks_without_hiding(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "hint")
+    # Every file was on screen and the list is short: nothing worth an interruption.
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "hint_not_needed"
+    # A long list: the order matters even though everything was shown.
+    monkeypatch.setattr(hook, "HINT_MIN_FILES", 5)
+    output, event = hook.run(_payload(root, transcript))
+    specific = output["hookSpecificOutput"]
+    assert event["outcome"] == "hinted" and "updatedToolOutput" not in specific
+    assert "src/rules.py 0.90" in specific["additionalContext"]
+    assert "9 scored below" in specific["additionalContext"] and "Nothing was hidden" in specific["additionalContext"]
+
+
+def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "hint")
+    payload = _bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
+                            stdout="docs/note0.md:1:Enterprise note 0\ndocs/note1.md:1:Enterprise note 1\n")
+    output, event = hook.run(payload)
+    note = output["hookSpecificOutput"]["additionalContext"]
+    assert event["outcome"] == "hinted" and event["unseen_top"] == 1
+    assert "Not in the output you saw: src/rules.py" in note
+
+
+def test_rewake_delivery_exits_2_with_the_hint_on_stderr(monkeypatch, capsys):
+    note = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Jev relevance hint: x"}}
+    monkeypatch.setattr(hook, "run", lambda payload: (note, {"outcome": "hinted"}))
+    monkeypatch.setattr(hook, "_log", lambda event: None)
+    monkeypatch.setattr(hook, "DELIVERY", "rewake")
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps({"tool_name": "Bash"})))
+    assert hook.main() == 2
+    captured = capsys.readouterr()
+    assert captured.err == "Jev relevance hint: x\n" and captured.out == ""
+    monkeypatch.setattr(hook, "run", lambda payload: (None, {"outcome": "shadow_ranked"}))
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps({"tool_name": "Bash"})))
+    assert hook.main() == 0  # no hint: a silent, successful exit
+
+
+def test_bash_description_states_the_search_purpose(repo, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "BASH_MIN_BYTES", 0)
+    seen = []
+    real = engine_module.SearchEngine
+
+    class Recording(real):
+        def search(self, request, invocation=None):
+            seen.append(request["query"])
+            return super().search(request, invocation)
+
+        def __init__(self, loaded, env=None, **kwargs):
+            super().__init__(loaded, env=env, provider=KeywordProvider("rules"))
+
+    monkeypatch.setattr(engine_module, "SearchEngine", Recording)
+    payload = _bash_payload(root, transcript, "rg -n -i Enterprise")
+    payload["tool_input"]["description"] = "Find where Enterprise campaigns are excluded"
+    _, event = hook.run(payload)
+    assert "What this search is for: Find where Enterprise campaigns are excluded" in seen[0]
+    assert "Recent user requests, newest last: where are Enterprise" in seen[0]
+    assert event["intent"] == "description" and event["tool_use_id"] == "tool-1"
+
+
+def test_snippets_keep_only_the_lines_around_matches():
+    from mcp.jev.grep.chunker import PreparedFragment
+    text = "".join(f"line {n}\n" for n in range(10, 60))
+    fragment = PreparedFragment(id="f", path="a.py", sha256="x", start_line=10, end_line=59, byte_start=100,
+                                byte_end=100 + len(text), text=text, byte_count=len(text), token_count=0,
+                                chunker="c")
+    trim = hook.snippet_mapper({"a.py": {30, 33}}, 2)
+    snippet = trim(fragment)
+    assert (snippet.start_line, snippet.end_line) == (28, 35)
+    assert snippet.text == "".join(f"line {n}\n" for n in range(28, 36))
+    assert snippet.byte_start == 100 + len("".join(f"line {n}\n" for n in range(10, 28)))
+    assert snippet.byte_count == len(snippet.text) and snippet.token_count > 0
+    assert trim(fragment) is None  # an overlapping twin with the same matches is scored once
+    assert hook.snippet_mapper({"a.py": {5}}, 2)(fragment) is None  # no match inside: not a candidate
+
+
+@pytest.mark.parametrize("command", [
+    "rg -n foo | head", "rg -n foo | head -20", "grep -rn foo . 2>/dev/null | head -n 30",
+    "rg foo 2>/dev/null|head --lines=5",
+])
+def test_bash_search_accepts_a_trailing_head(tmp_path, command):
+    args, _, _, pattern, truncated = hook.bash_search(command, str(tmp_path))
+    assert pattern == "foo" and truncated is True and args[-2:] == ["-e", "foo"]
+
+
+def test_head_cut_output_is_ranked_even_when_small(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "shadow")
+    output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise | head -3",
+                                           stdout="docs/note0.md:1:Enterprise\n"))
+    assert output is None and event["outcome"] == "shadow_ranked" and event["truncated"] is True
+    assert event["ranked"][0] == ["src/rules.py", 0.9]
+
+
+def test_subagent_calls_read_the_agent_transcript(repo, provider, tmp_path):
+    root, transcript = repo
+    session = tmp_path / "session.jsonl"
+    session.write_text(json.dumps({"type": "user", "message": {"content": "main session chat"}}) + "\n")
+    agent_file = tmp_path / "session" / "subagents" / "agent-abc123.jsonl"
+    agent_file.parent.mkdir(parents=True)
+    agent_file.write_text(json.dumps({"type": "user", "message": {"content": "Where are Enterprise rules?"}}) + "\n")
+    payload = {**_payload(root, transcript), "transcript_path": str(session), "agent_id": "abc123",
+               "agent_type": "Explore"}
+    assert hook.agent_transcript(payload) == str(agent_file)
+    _, event = hook.run(payload)
+    assert event["transcript"] == str(agent_file) and event["agent_type"] == "Explore"
+    assert hook.agent_transcript({**payload, "agent_id": "../x"}) == str(session)
+    assert hook.agent_transcript({**payload, "agent_id": "missing"}) == str(session)
+
+
+def test_nothing_sendable_is_not_reported_as_ranked(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "shadow")
+    monkeypatch.setattr(hook, "snippet_mapper", lambda lines, radius: (lambda fragment: None))
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "nothing_evaluated"
+
+
+def test_paths_outside_the_working_directory_are_shown_absolute(tmp_path):
+    assert hook._shown(str(tmp_path / "a" / "b.py"), str(tmp_path)) == "a/b.py"
+    assert hook._shown(str(tmp_path / "a" / "b.py"), str(tmp_path / "other")) == str(tmp_path / "a" / "b.py")

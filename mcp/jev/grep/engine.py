@@ -100,7 +100,7 @@ class SearchEngine:
             logger=self._logger or SearchLogger("silent"),
         )
         try:
-            return self._run(request, context, invocation.get("fragment_filter"))
+            return self._run(request, context, invocation.get("fragment_filter"), invocation.get("fragment_map"))
         except (RequestValidationError, ConfigurationError, ResponseBudgetError,
                 UnauthorizedPathError, ProviderError) as cause:
             code = _error_code_of(cause)
@@ -109,7 +109,7 @@ class SearchEngine:
         except ContractValidationError:
             raise  # a contract failure later in the pipeline is a defect, stay loud
 
-    def _run(self, raw_request, context: SearchContext, fragment_filter=None) -> dict:
+    def _run(self, raw_request, context: SearchContext, fragment_filter=None, fragment_map=None) -> dict:
         config = self._configuration["config"]
         try:
             request = parse_search_request(raw_request, ResponseLimits(
@@ -144,9 +144,12 @@ class SearchEngine:
         root.assert_current()
 
         # In-process callers (the grep filter hook) may narrow evaluation to a
-        # candidate subset; the report's fragment total then counts that subset.
+        # candidate subset, and trim each fragment (None drops it); the report's
+        # fragment total then counts that subset. Trimmed text keys its own cache entry.
         if fragment_filter is not None:
             prepared.fragments = [fragment for fragment in prepared.fragments if fragment_filter(fragment)]
+        if fragment_map is not None:
+            prepared.fragments = [mapped for mapped in map(fragment_map, prepared.fragments) if mapped is not None]
 
         if not prepared.inventory.complete:
             context.add_stop_reason("INVENTORY_INCOMPLETE")
