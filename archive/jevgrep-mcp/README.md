@@ -3,8 +3,10 @@
 Retired on 2026-09-28. The `semantic_search_code` MCP tool and the "search with
 jevgrep first" prompt rules are removed from every harness (Claude, agy, Qoder,
 ZCode). Agents search with Grep, and the Claude Code PostToolUse hook
-`hooks/claude-grep-filter.py` uses the Jev engine to hide the low-relevance
-files in noisy Grep results.
+`hooks/claude-grep-filter.py` uses the Jev engine to rank noisy Grep and
+`rg` / `grep` results and hint which files and lines to read first (it hid
+low-relevance files until that mode was retired; see
+`archive/grep-filter-hide-mode/`).
 
 Still live, used by the Grep filter: the engine library in `mcp/jev/grep/`
 (profiles, inventory, cache, credential quarantine, scoring) and the `jevgrep`

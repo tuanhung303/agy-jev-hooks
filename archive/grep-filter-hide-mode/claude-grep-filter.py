@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
-"""PostToolUse hint for Claude Code's Grep, and for plain `rg` / `grep` run
+"""PostToolUse filter for Claude Code's Grep, and for plain `rg` / `grep` run
 through Bash: Jev scores the code around each match against the current task,
-and Claude is told which files and lines to read first. Nothing is hidden: Jev
-puts the answer in its top 10 about 60% of the time, too often wrong to drop
-output on (a live filter hid the file the agent needed; see
-archive/grep-filter-hide-mode/).
+and Claude sees the relevant files only.
 
-Grep finds candidates locally; Jev only evaluates the lines around each match,
-under the same JevGrep profile, ignore rules and credential quarantine as
-semantic_search_code. Any error, a partial scan or an unauthorized path yields
-no hint. A Bash command is ranked only when the hook can mirror it exactly: one
-search command, optionally after `cd DIR &&` and before `| head`, known flags
-only. Jev is called only when a hint can help: some matched file is missing
-from what the agent saw (cut by head or a limit), or the list is long enough
-that order matters.
+Grep finds candidates locally; Jev only evaluates fragments that contain a
+match, under the same JevGrep profile, ignore rules and credential quarantine
+as semantic_search_code. Fail open: any error, a partial scan, an unauthorized
+path or a result nobody scored above threshold returns the original output.
+A Bash command is filtered only when the hook can mirror it exactly: one
+search command, optionally after `cd DIR &&`, no pipes or redirects, known
+flags only, and output large enough to be worth the wait.
+Repeating the identical Grep call or command in a session returns it unfiltered.
 
-Run it as an async hook with asyncRewake: the search never waits, and the hint
-reaches Claude as exit-2 stderr when Jev answers (5-25 s later).
-Modes (CLAUDE_GREP_FILTER_MODE): `shadow` (default) ranks and logs only, `hint`
-also tells Claude, `off`. The query is the user's recent prompts plus the Bash
-description of what the search is for.
+Modes (CLAUDE_GREP_FILTER_MODE): `shadow` (default) ranks and logs only, and is
+meant to run as an async hook so the search never waits; `hint` adds Jev's top
+files as context and hides nothing; `filter` hides low-scored files; `off`.
+The query is the user's recent prompts plus what the call says it is for (the
+Bash description, or the assistant's text before the call when the transcript
+has it), and Jev reads only the lines around each match.
 """
+import hashlib
 import json
 import os
 import re
@@ -28,7 +27,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,16 +38,20 @@ if str(REPO_DIR) not in sys.path:
 
 STATE_DIR = Path(os.environ.get("CLAUDE_GREP_FILTER_STATE") or
                  Path.home() / ".local/state/agy-jev-hooks/claude-grep-filter")
-MODE = os.environ.get("CLAUDE_GREP_FILTER_MODE", "shadow")  # off | shadow | hint
+MODE = os.environ.get("CLAUDE_GREP_FILTER_MODE", "shadow")  # off | shadow | hint | filter
 MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MIN_FILES", "8"))
 MAX_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_FILES", "60"))  # beyond: too broad, pass through at once
 MAX_BYTES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_BYTES", "600000"))
 BUDGET_S = float(os.environ.get("CLAUDE_GREP_FILTER_BUDGET_S", "60"))
+# Bash output below this is cheaper to read than the Jev round trip (5-15 s) it would cost.
 # A hint is worth an interruption only when it names a relevant file the agent did not see, or
 # orders a list long enough that the order matters.
 HINT_MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_HINT_MIN_FILES", "15"))
+# rewake: run as an async hook with asyncRewake; the hint reaches Claude when Jev answers (exit 2).
+DELIVERY = os.environ.get("CLAUDE_GREP_FILTER_DELIVERY", "context")  # context | rewake
+BASH_MIN_BYTES = int(os.environ.get("CLAUDE_GREP_FILTER_BASH_MIN_BYTES", "4000"))
 MAX_SCOPE_ENTRIES, MAX_SCOPE_BYTES, MAX_QUERY_BYTES = 32, 4096, 8192  # request contract limits
-TASK_CHARS, RECENT_PROMPTS = 1500, 3
+TASK_CHARS, STEP_CHARS, RECENT_PROMPTS = 1500, 600, 3
 SNIPPET_LINES = int(os.environ.get("CLAUDE_GREP_FILTER_SNIPPET_LINES", "12"))  # context kept around matches
 REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 HANDLED_MODES = ("files_with_matches", "content")
@@ -63,6 +66,34 @@ def _log(event):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         with open(STATE_DIR / "events.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps({"ts": _now(), **event}) + "\n")
+    except OSError:
+        pass
+
+
+def _seen_marker(payload):
+    """Marks a Grep call that was filtered; its identical repeat in the session bypasses the filter."""
+    key = hashlib.sha256(json.dumps([payload.get("session_id"), payload.get("tool_input")],
+                                    sort_keys=True).encode("utf-8")).hexdigest()
+    return STATE_DIR / "seen" / key
+
+
+def _claim(payload):
+    """Atomically claim this Grep call. False when an identical call already holds the
+    claim: a repeat, or a twin Claude Code runs in parallel. Either stays unfiltered."""
+    marker = _seen_marker(payload)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return True  # no state dir: filter, but a repeat cannot bypass
+
+
+def _release(payload):
+    try:
+        _seen_marker(payload).unlink()
     except OSError:
         pass
 
@@ -87,37 +118,43 @@ def agent_transcript(payload):
     return path
 
 
-def task_from_transcript(path):
-    """The user's last few genuine prompts, newest last. One prompt is often a bare "yes, do it";
-    the ones before it carry what the work is about. The assistant's text before the call is not
-    used: Claude Code writes it to the transcript after PostToolUse hooks run, so what the hook
-    would find there is an older, stale step."""
-    prompts = []
+def task_from_transcript(path, tool_use_id=None):
+    """The user's last few genuine prompts (newest last) and the assistant text that led to this call.
+    One prompt is often a bare "yes, do it"; the ones before it carry what the work is about."""
+    prompts, step = [], ""
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()[-400:]
     except (OSError, TypeError):
-        return ""
+        return task, step
     for line in lines:
         try:
             entry = json.loads(line)
         except ValueError:
             continue
-        content = (entry.get("message") or {}).get("content")
-        if entry.get("type") != "user" or entry.get("isMeta"):
-            continue
-        if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                             for b in content):
-            continue
-        text = REMINDER.sub("", _text_of(content)).strip()
-        if text and not text.startswith(("<local-command", "<command-name>")):
-            prompts = prompts[-(RECENT_PROMPTS - 1):] + [text]
-    return "\n\n".join(prompts)[-TASK_CHARS:]
+        message = entry.get("message") or {}
+        content = message.get("content")
+        if entry.get("type") == "user" and not entry.get("isMeta"):
+            if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
+                                                 for b in content):
+                continue
+            text = REMINDER.sub("", _text_of(content)).strip()
+            if text and not text.startswith(("<local-command", "<command-name>")):
+                prompts, step = prompts[-(RECENT_PROMPTS - 1):] + [text], ""
+        elif entry.get("type") == "assistant":
+            text = _text_of(content).strip()
+            if text:
+                step = text
+            if tool_use_id and isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("id") == tool_use_id for b in content):
+                break
+    return "\n\n".join(prompts)[-TASK_CHARS:], step[-STEP_CHARS:]
 
 
-def build_query(task, pattern, purpose=""):
+def build_query(task, step, pattern, purpose=""):
     parts = [f"Recent user requests, newest last: {task}" if task else "",
              f"What this search is for: {purpose}" if purpose else "",
+             f"Current step: {step}" if step else "",
              f"Which code matching the grep pattern {pattern!r} is relevant to this task?"]
     query = "\n".join(part for part in parts if part)
     # The contract bounds UTF-8 bytes, not characters (Vietnamese prompts are multi-byte).
@@ -339,10 +376,34 @@ def cover(paths, limit=MAX_SCOPE_ENTRIES, max_bytes=MAX_SCOPE_BYTES):
     return sorted(entries)
 
 
+def filtered_response(response, hide_paths):
+    """The Grep output shape Claude Code expects, without hide_paths."""
+    updated = dict(response)
+    if response.get("mode") == "files_with_matches":
+        updated["filenames"] = [name for name in response.get("filenames") or [] if name not in hide_paths]
+        updated["numFiles"] = len(updated["filenames"])
+        return updated
+    kept = _drop_orphan_separators(
+        [line for line in str(response.get("content") or "").split("\n")
+         if not any(line.startswith(path + ":") or line.startswith(path + "-") for path in hide_paths)])
+    updated["content"] = "\n".join(kept)
+    if "numLines" in updated:
+        updated["numLines"] = len(kept)
+    return updated
+
+
 def _shown(absolute, cwd):
     """A path as the agent would type it: relative inside the working directory, absolute outside it."""
     relative = os.path.relpath(absolute, cwd)
     return absolute if relative.startswith("..") else relative
+
+
+def _drop_orphan_separators(kept):
+    """Drop context separators left leading, trailing or doubled by a hidden file."""
+    kept = [line for index, line in enumerate(kept) if line != "--" or (kept[index - 1:index] != ["--"] and index > 0)]
+    while kept and kept[-1] == "--":
+        kept.pop()
+    return kept
 
 
 def line_owner(known_files, cwd):
@@ -376,6 +437,21 @@ def visible_files(response, known_files, cwd):
     return {owner(line) for line in text.split("\n")} - {None}
 
 
+def filtered_bash_response(response, hide_files, known_files, cwd):
+    """Bash output without the lines of hide_files (see line_owner for how a line finds its file)."""
+    hide = {os.path.normpath(path) for path in hide_files}
+    owner = line_owner(set(known_files) | hide, cwd)
+
+    def hidden(line):
+        return owner(line) in hide
+
+    stdout = str(response.get("stdout") or "")
+    lines = stdout.split("\n")
+    trailing = lines[-1] == ""
+    kept = _drop_orphan_separators([line for line in (lines[:-1] if trailing else lines) if not hidden(line)])
+    return {**response, "stdout": "\n".join(kept) + ("\n" if trailing and kept else "")}
+
+
 def run(payload):
     started = time.time()
     event = {"session": payload.get("session_id"), "mode": MODE}
@@ -383,9 +459,8 @@ def run(payload):
     response = payload.get("tool_response") or {}
     tool_name = payload.get("tool_name")
     cwd = os.path.realpath(payload.get("cwd") or os.getcwd())
-    if MODE not in ("shadow", "hint"):
+    if MODE == "off":
         return None, {**event, "outcome": "not_applicable"}
-    purpose = ""
     if tool_name == "Grep" and response.get("mode") in HANDLED_MODES:
         search_paths = [os.path.realpath(os.path.join(cwd, tool_input.get("path") or "."))]
         search_args, pattern = grep_tool_args(tool_input), tool_input.get("pattern")
@@ -396,10 +471,15 @@ def run(payload):
         search_args, search_paths, cwd, pattern, truncated = search
         event["tool"] = "Bash"
         if truncated:
-            event["truncated"] = True
+            event["truncated"] = True  # the agent saw only the head: ranking the rest is the point
+        elif len(response["stdout"].encode("utf-8")) < BASH_MIN_BYTES:
+            return None, {**event, "outcome": "small_output"}
         purpose = str(tool_input.get("description") or "")
+        # Only the command identifies a repeat; Claude rewrites the description freely.
+        payload = {**payload, "tool_input": {"command": tool_input.get("command")}}
     else:
         return None, {**event, "outcome": "not_applicable"}
+    tool_input = {"pattern": pattern, "purpose": purpose if tool_name == "Bash" else ""}
 
     search_path = search_paths[0] if len(search_paths) == 1 else os.path.commonpath(search_paths)
     matches = grep_matches(search_args, search_paths)
@@ -407,27 +487,34 @@ def run(payload):
     if len(matches) < MIN_FILES:
         return None, {**event, "outcome": "few_files"}
     if len(matches) > MAX_FILES:
-        return None, {**event, "outcome": "too_broad"}
-    seen = {os.path.realpath(path) for path in visible_files(response, matches, cwd)}
-    event["unseen_files"] = len(matches) - len(seen)
-    # Every match already on screen and too few to need ordering: no hint could come of a Jev call.
-    if MODE == "hint" and not event["unseen_files"] and len(matches) < HINT_MIN_FILES:
-        return None, {**event, "outcome": "all_shown"}
-    return _rank(payload, event, {"pattern": pattern, "purpose": purpose}, seen, cwd, search_path,
-                 matches, started)
+        note = (f"Jev grep filter: {len(matches)} files match, too many to rank quickly; output unchanged. "
+                "Pass a narrower path to Grep to get relevance filtering.")
+        output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}
+        return (output if MODE == "filter" else None), {**event, "outcome": "too_broad"}
+    claimed = MODE == "filter"  # only hiding needs the repeat bypass
+    if claimed and not _claim(payload):
+        return None, {**event, "outcome": "repeat_unfiltered"}
+    output, event = None, {**event, "outcome": "error"}
+    try:
+        output, event = _rank(payload, event, tool_input, response, cwd, search_path, matches, started)
+    finally:
+        if claimed and event.get("outcome") != "filtered":
+            _release(payload)  # only a filtered call arms the repeat bypass
+    return output, event
 
 
-def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
+def _rank(payload, event, tool_input, response, cwd, search_path, matches, started):
+
     from mcp.jev.grep.config import ConfigurationError, find_profile_for, load_configuration
     from mcp.jev.grep.engine import SearchEngine
     from mcp.jev.grep.prepare import find_credential_pattern
 
     transcript = agent_transcript(payload)
-    task = task_from_transcript(transcript)
-    query = build_query(task, str(tool_input.get("pattern", "")), tool_input.get("purpose", ""))
+    task, step = task_from_transcript(transcript, payload.get("tool_use_id"))
+    query = build_query(task, step, str(tool_input.get("pattern", "")), tool_input.get("purpose", ""))
     event.update({"tool_use_id": payload.get("tool_use_id"), "transcript": transcript,
                   "agent_type": payload.get("agent_type"),
-                  "intent": "description" if tool_input.get("purpose") else "prompts"})
+                  "intent": "description" if tool_input.get("purpose") else ("step" if step else "prompts")})
     if find_credential_pattern(query):
         return None, {**event, "outcome": "query_quarantined"}
     try:
@@ -471,30 +558,57 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
         return None, {**event, "outcome": "nothing_evaluated"}
     ranked = sorted(best, key=lambda p: -best[p])
     relevant = [path for path in ranked if best[path] >= threshold]
-    low = len(best) - len(relevant)
-    event.update({"kept_files": len(relevant), "low_files": low,
+    # Hide only what Jev scored low; anything it never evaluated stays visible.
+    hidden = [path for path in lines if path in best and best[path] < threshold]
+    event.update({"kept_files": len(relevant), "hidden_files": len(hidden),
                   "ranked": [[path, round(best[path], 2)] for path in ranked[:10]]})
     if MODE == "shadow":
         return None, {**event, "outcome": "shadow_ranked"}
-    if not relevant:
-        return None, {**event, "outcome": "none_relevant"}
-    unseen = [p for p in relevant[:3] if os.path.realpath(os.path.join(root, p)) not in seen]
-    event["unseen_top"] = len(unseen)
-    if not unseen and len(best) < HINT_MIN_FILES:
-        return None, {**event, "outcome": "hint_not_needed"}
-    as_shown = {path: _shown(os.path.join(root, path), cwd) for path in relevant}
-    top = relevant[:8]
-    # Print the shared folder once: long absolute paths were over half of the hint's tokens.
-    base = os.path.commonpath([os.path.dirname(as_shown[p]) or "." for p in top]) if len(top) > 1 else ""
-    base = "" if base in ("", ".", "/") else base
+    as_shown = {path: _shown(os.path.join(root, path), cwd) for path in lines}
+    if MODE == "hint":
+        if not relevant:
+            return None, {**event, "outcome": "none_relevant"}
+        seen = visible_files(response, [os.path.join(root, p) for p in lines], cwd)
+        unseen = [p for p in relevant[:3] if os.path.normpath(os.path.join(root, p)) not in seen]
+        event["unseen_top"] = len(unseen)
+        if not unseen and len(best) < HINT_MIN_FILES:
+            return None, {**event, "outcome": "hint_not_needed"}
+        top = relevant[:8]
+        # Print the shared folder once: long absolute paths were over half of the hint's tokens.
+        base = os.path.commonpath([os.path.dirname(as_shown[p]) or "." for p in top]) if len(top) > 1 else ""
+        base = "" if base in ("", ".", "/") else base
 
-    def entry(p):
-        shown = os.path.relpath(as_shown[p], base) if base else as_shown[p]
-        return f"{shown}:{span[p][0]}-{span[p][1]} ({best[p]:.2f}{', not in your output' if p in unseen else ''})"
-    note = (f"Jev hint for the search {tool_input.get('pattern')!r} ({len(best)} files). Most relevant lines, "
-            f"read these first{f' (under {base}/)' if base else ''}: " + ", ".join(entry(p) for p in top)
-            + (f". {low} more scored below {threshold}" if low else "") + ". Nothing was hidden.")
-    return note, {**event, "outcome": "hinted"}
+        def entry(p):
+            shown = os.path.relpath(as_shown[p], base) if base else as_shown[p]
+            return f"{shown}:{span[p][0]}-{span[p][1]} ({best[p]:.2f}{', not in your output' if p in unseen else ''})"
+        note = (f"Jev hint for the search {tool_input.get('pattern')!r} ({len(best)} files). Most relevant lines, "
+                f"read these first{f' (under {base}/)' if base else ''}: " + ", ".join(entry(p) for p in top)
+                + (f". {len(hidden)} more scored below {threshold}" if hidden else "") + ". Nothing was hidden.")
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}, \
+            {**event, "outcome": "hinted"}
+    if not relevant:
+        note = (f"Jev grep filter: none of the {len(best)} evaluated files matching "
+                f"{tool_input.get('pattern')!r} scored as relevant to the task; output unchanged.")
+        output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}
+        return (output if MODE == "filter" else None), {**event, "outcome": "none_relevant"}
+
+    if not hidden:
+        return None, {**event, "outcome": "all_relevant"}
+
+    by_dir = Counter(path.split("/")[0] for path in hidden)
+    note = (f"Jev grep filter: kept {len(relevant)} of {len(best)} evaluated files matching "
+            f"{tool_input.get('pattern')!r} as relevant to the task ("
+            + ", ".join(f"{as_shown[p]} {best[p]:.2f}" for p in relevant[:8])
+            + f"). Hidden {len(hidden)} low-relevance files"
+            + (f" (by top directory: {', '.join(f'{k} {v}' for k, v in by_dir.most_common(5))})" if by_dir else "")
+            + (". To see every match, rerun the identical command." if payload.get("tool_name") == "Bash"
+               else ". To see every match, repeat the identical Grep call."))
+    if payload.get("tool_name") == "Bash":
+        updated = filtered_bash_response(response, {os.path.join(root, p) for p in hidden}, matches, cwd)
+    else:
+        updated = filtered_response(response, {as_shown[p] for p in hidden})
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated,
+                                   "additionalContext": note}}, {**event, "outcome": "filtered"}
 
 
 def main():
@@ -504,16 +618,17 @@ def main():
         print("{}")
         return 0
     try:
-        note, event = run(payload)
-    except Exception as cause:  # fail quiet: the search result is never touched
-        note, event = None, {"session": payload.get("session_id"), "outcome": "error",
-                             "error": type(cause).__name__}
+        output, event = run(payload)
+    except Exception as cause:  # fail open: grep output stays as it was
+        output, event = None, {"session": payload.get("session_id"), "outcome": "error",
+                               "error": type(cause).__name__}
     if not event.pop("quiet", False):  # every non-search Bash call lands here; keep the log to searches
         _log(event)
-    if note:
-        sys.stderr.write(note + "\n")  # exit-2 stderr reaches Claude, at once or via asyncRewake
+    specific = (output or {}).get("hookSpecificOutput") or {}
+    if DELIVERY == "rewake" and specific.get("additionalContext") and "updatedToolOutput" not in specific:
+        sys.stderr.write(specific["additionalContext"] + "\n")  # asyncRewake hands exit-2 stderr to Claude
         return 2
-    print("{}")
+    print(json.dumps(output or {}))
     return 0
 
 

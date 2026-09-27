@@ -1,6 +1,5 @@
-"""Offline tests for the Grep / Bash PostToolUse hint: real profile resolution,
-inventory and engine, with a scripted provider in place of Jev. Tests of the
-retired hide mode live in archive/grep-filter-hide-mode/."""
+"""Offline tests for the Grep PostToolUse filter: real profile resolution,
+inventory and engine, with a scripted provider in place of Jev."""
 import importlib.util
 import json
 from pathlib import Path
@@ -58,7 +57,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-only")
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only")
     monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr(hook, "MODE", "shadow")
+    monkeypatch.setattr(hook, "MODE", "filter")
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text("\n".join(json.dumps(entry) for entry in [
         {"type": "user", "message": {"content": "where are Enterprise campaigns excluded from spend?"}},
@@ -92,27 +91,57 @@ def _payload(root, transcript, mode="files_with_matches", **tool_input):
             "tool_input": {"pattern": "Enterprise", "-i": True, **tool_input}, "tool_response": response}
 
 
-def test_ranks_only_matched_files_the_profile_allows(repo, provider):
+def test_filters_low_relevance_files_and_keeps_unevaluated_ones(repo, provider):
     root, transcript = repo
     output, event = hook.run(_payload(root, transcript))
-    assert output is None and event["outcome"] == "shadow_ranked"
-    assert event["ranked"][0] == ["src/rules.py", 0.9]
-    assert event["kept_files"] == 1 and event["low_files"] == 9
-    assert not any(path.startswith("tmp/") for path in provider.sent_paths)  # profile deny: never sent
+    specific = output["hookSpecificOutput"]
+    assert event["outcome"] == "filtered"
+    # rules.py scored relevant; tmp/ was never sent (profile deny) so it stays visible.
+    assert specific["updatedToolOutput"]["filenames"] == ["src/rules.py", "tmp/scratch.py"]
+    assert specific["updatedToolOutput"]["numFiles"] == 2
+    assert "kept 1 of 10 evaluated files" in specific["additionalContext"]
+    assert "repeat the identical Grep call" in specific["additionalContext"]
+    assert not any(path.startswith("tmp/") for path in provider.sent_paths)
     assert "src/unrelated.py" not in provider.sent_paths  # no match: never a candidate
 
 
-def test_content_mode_is_ranked_too(repo, provider):
+def test_content_mode_keeps_the_output_shape(repo, provider):
     root, transcript = repo
-    _, event = hook.run(_payload(root, transcript, mode="content", **{"-n": True}))
-    assert event["outcome"] == "shadow_ranked" and event["ranked"][0] == ["src/rules.py", 0.9]
+    output, _ = hook.run(_payload(root, transcript, mode="content", **{"-n": True}))
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    assert set(updated) == {"mode", "numFiles", "filenames", "numLines", "content"}
+    assert updated["content"].split("\n") == ["src/rules.py:1:Enterprise", "tmp/scratch.py:1:Enterprise"]
+    assert updated["numLines"] == 2
+
+
+def test_identical_repeat_is_unfiltered(repo, provider):
+    root, transcript = repo
+    assert hook.run(_payload(root, transcript))[1]["outcome"] == "filtered"
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "repeat_unfiltered"
+
+
+def test_parallel_identical_twin_stays_unfiltered(repo, provider):
+    root, transcript = repo
+    assert hook._claim(_payload(root, transcript))  # the twin already holds the claim
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "repeat_unfiltered"
+
+
+def test_unfiltered_call_does_not_arm_the_repeat_bypass(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MAX_BYTES", 10)
+    assert hook.run(_payload(root, transcript))[1]["outcome"] == "search_rejected"
+    monkeypatch.setattr(hook, "MAX_BYTES", 600000)
+    assert hook.run(_payload(root, transcript))[1]["outcome"] == "filtered"
 
 
 def test_too_broad_passes_through_before_any_preparation(repo, provider, monkeypatch):
     root, transcript = repo
     monkeypatch.setattr(hook, "MAX_FILES", 5)
     output, event = hook.run(_payload(root, transcript))
-    assert output is None and event["outcome"] == "too_broad"
+    assert event["outcome"] == "too_broad" and "updatedToolOutput" not in output["hookSpecificOutput"]
+    assert "narrower path" in output["hookSpecificOutput"]["additionalContext"]
     assert provider.sent_paths == set()
 
 
@@ -124,16 +153,18 @@ def test_long_scope_lists_fit_the_report_budget(repo, provider):
         folder.mkdir(parents=True)
         (folder / "enterprise_handler.py").write_text("ENTERPRISE = True\n", encoding="utf-8")
     output, event = hook.run(_payload(root, transcript, path="src"))
-    assert event["outcome"] == "shadow_ranked", json.dumps(event)
+    assert event["outcome"] == "filtered", json.dumps(event)
 
 
-def test_few_files_are_not_ranked_and_shadow_never_hints(repo, provider, monkeypatch):
+def test_few_files_and_shadow_mode_leave_output_alone(repo, provider, monkeypatch):
     root, transcript = repo
     output, event = hook.run(_payload(root, transcript, path="src"))
     assert output is None and event["outcome"] == "few_files"
+    monkeypatch.setattr(hook, "MODE", "shadow")
     output, event = hook.run(_payload(root, transcript, glob="*"))
     assert output is None and event["outcome"] == "shadow_ranked"
-    assert event["ranked"][0] == ["src/rules.py", 0.9] and event["low_files"] == 9
+    assert event["ranked"][0] == ["src/rules.py", 0.9] and event["hidden_files"] == 9
+    assert not hook._seen_marker(_payload(root, transcript, glob="*")).exists()  # no repeat bypass armed
     output, event = hook.run(_payload(root, transcript, glob="*.md"))
     assert output is None and event["outcome"] == "shadow_ranked" and event["kept_files"] == 0
 
@@ -166,9 +197,7 @@ def test_task_comes_from_the_recent_real_prompts(tmp_path):
                                                       {"type": "tool_use", "id": "t1"}]}},
     ]), encoding="utf-8")
     # The last three prompts, newest last: a bare "yes, do it" keeps the ones that say what the work is.
-    # Assistant text is left out: at hook time the text that led to this call is not written yet.
-    assert hook.task_from_transcript(str(transcript)) == "oldest question\n\nold question\n\nnew question"
-    assert hook.task_from_transcript(str(tmp_path / "missing.jsonl")) == ""
+    assert hook.task_from_transcript(str(transcript), "t1") == ("oldest question\n\nold question\n\nnew question", "grepping now")
 
 
 def test_cover_respects_the_scope_entry_limit():
@@ -181,7 +210,7 @@ def test_cover_respects_the_scope_entry_limit():
 
 
 def test_query_is_bounded_in_utf8_bytes():
-    query = hook.build_query("tại sao " * 2000, "x")
+    query = hook.build_query("tại sao " * 2000, "", "x")
     assert len(query.encode("utf-8")) <= 8192
 
 
@@ -190,7 +219,7 @@ def test_count_mode_is_left_alone(repo, provider):
     payload = _payload(root, transcript)
     payload["tool_response"] = {"mode": "count", "numFiles": 11, "filenames": [], "content": "x:1",
                                 "numMatches": 11}
-    assert hook.run(payload) == (None, {"session": "sess", "mode": "shadow", "outcome": "not_applicable"})
+    assert hook.run(payload) == (None, {"session": "sess", "mode": "filter", "outcome": "not_applicable"})
 
 
 def test_path_without_a_profile_is_left_alone(tmp_path, repo, provider):
@@ -201,6 +230,15 @@ def test_path_without_a_profile_is_left_alone(tmp_path, repo, provider):
         (outside / f"f{index}.py").write_text("Enterprise\n", encoding="utf-8")
     output, event = hook.run(_payload(outside, transcript))
     assert output is None and event["outcome"] == "no_profile"
+
+
+def test_context_lines_and_separators_follow_the_hidden_files():
+    response = {"mode": "content", "numFiles": 0, "filenames": [], "numLines": 7, "content": "\n".join([
+        "a.py-1-before", "a.py:2:match", "--", "b.py-4-before", "b.py:5:match", "--", "c.py:9:match"])}
+    updated = hook.filtered_response(response, {"b.py"})
+    assert updated["content"] == "a.py-1-before\na.py:2:match\n--\nc.py:9:match"
+    assert updated["numLines"] == 4
+    assert hook.filtered_response(response, {"a.py", "c.py"})["content"] == "b.py-4-before\nb.py:5:match"
 
 
 def test_provider_failure_fails_open(repo, monkeypatch):
@@ -221,6 +259,7 @@ def test_provider_failure_fails_open(repo, monkeypatch):
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps(_payload(root, transcript))))
     assert hook.main() == 0
     assert events[-1]["outcome"] in ("search_partial", "error")
+    assert not hook._seen_marker(_payload(root, transcript)).exists()  # claim released
 
 
 def test_nested_profile_owns_its_subtree(tmp_path, repo, provider):
@@ -234,7 +273,7 @@ def test_nested_profile_owns_its_subtree(tmp_path, repo, provider):
     config["remote_evaluation_enabled"] = True
     (tmp_path / "config" / "worktrees.yaml").write_text(dump_configuration_yaml(config), encoding="utf-8")
     output, event = hook.run(_payload(root, transcript, path="tmp/worktrees/wt"))
-    assert event["outcome"] == "shadow_ranked"
+    assert event["outcome"] == "filtered"
     # Scored under the nested profile: every path is relative to its root.
     assert "wt/rules_x.py" in provider.sent_paths
     assert all(path.startswith("wt/") for path in provider.sent_paths)
@@ -249,18 +288,21 @@ def test_paths_with_spaces_and_unicode(repo, provider):
     assert event["outcome"] in ("few_files",) or "src/thư mục có dấu/rules đặc biệt.py" in provider.sent_paths
 
 
-def test_hint_skips_jev_when_every_match_is_already_on_screen(repo, provider, monkeypatch):
+def test_nothing_to_hide_is_a_plain_pass_through(repo, monkeypatch):
     root, transcript = repo
-    monkeypatch.setattr(hook, "MODE", "hint")
-    # 11 files, all shown, fewer than HINT_MIN_FILES: no hint could come of it, so Jev is not called.
+    real = engine_module.SearchEngine
+
+    class Everything(real):
+        def __init__(self, loaded, env=None, **kwargs):
+            super().__init__(loaded, env=env, provider=KeywordProvider(""))  # "" matches every path
+
+    monkeypatch.setattr(engine_module, "SearchEngine", Everything)
     output, event = hook.run(_payload(root, transcript))
-    assert output is None and event["outcome"] == "all_shown" and event["unseen_files"] == 0
-    output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise"))
-    assert output is None and event["outcome"] == "all_shown"
-    assert provider.sent_paths == set()
+    assert output is None and event["outcome"] == "all_relevant"
+    assert not hook._seen_marker(_payload(root, transcript)).exists()
 
 
-# Bash: plain rg / grep commands get the same hint.
+# Bash: plain rg / grep commands get the same filter.
 
 def _bash_payload(root, transcript, command, stdout=None):
     names = sorted([f"docs/note{i}.md" for i in range(9)] + ["src/rules.py", "tmp/scratch.py"])
@@ -304,11 +346,28 @@ def test_bash_search_follows_a_leading_cd(tmp_path):
     assert cwd == paths[0] == str(tmp_path / "sub dir")
 
 
-def test_bash_rg_output_is_ranked(repo, provider):
+def test_bash_filters_rg_output(repo, provider, monkeypatch):
     root, transcript = repo
+    monkeypatch.setattr(hook, "BASH_MIN_BYTES", 0)
     output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise"))
-    assert output is None and event["outcome"] == "shadow_ranked" and event["tool"] == "Bash"
-    assert event["ranked"][0] == ["src/rules.py", 0.9]
+    specific = output["hookSpecificOutput"]
+    assert event["outcome"] == "filtered" and event["tool"] == "Bash"
+    updated = specific["updatedToolOutput"]
+    assert set(updated) == {"stdout", "stderr", "interrupted", "isImage"}
+    assert updated["stdout"] == "src/rules.py:1:Enterprise\ntmp/scratch.py:1:Enterprise\n"
+    assert "rerun the identical command" in specific["additionalContext"]
+    # The repeat is keyed on the command, not on Claude's free-text description.
+    again = _bash_payload(root, transcript, "rg -n -i Enterprise")
+    again["tool_input"]["description"] = "search again"
+    assert hook.run(again) == (None, {"session": "sess", "mode": "filter", "tool": "Bash",
+                                      "matched_files": 11, "outcome": "repeat_unfiltered"})
+
+
+def test_bash_small_output_is_not_worth_a_round_trip(repo, provider):
+    root, transcript = repo
+    output, event = hook.run(_bash_payload(root, transcript, "rg -i Enterprise"))
+    assert output is None and event["outcome"] == "small_output"
+    assert provider.sent_paths == set()
 
 
 def test_non_search_bash_is_not_logged(monkeypatch, capsys):
@@ -321,24 +380,27 @@ def test_non_search_bash_is_not_logged(monkeypatch, capsys):
 
 
 def test_bash_output_paths_resolve_in_every_printed_form(tmp_path):
-    a, old = str(tmp_path / "a.py"), str(tmp_path / "a.py-old")
-
-    def shown(*lines):
-        return hook.visible_files({"stdout": "\n".join(lines) + "\n"}, {a, old}, str(tmp_path))
-    # A line of a.py-old never counts as a context line of a.py, whatever form the path takes.
-    assert shown("a.py-old:1:x", "a.py-old-2-z:w", "--", "a.py-old") == {old}
-    assert shown("./a.py-2-context") == shown(f"{a}:3:y") == shown("a.py") == {a}
+    hide, keep = str(tmp_path / "a.py"), str(tmp_path / "a.py-old")
+    stdout = "\n".join([
+        "a.py:1:x", "./a.py-2-context", f"{hide}:3:y", "--", "a.py-old:1:x", "a.py-old-2-z:w", "--",
+        "a.py", "a.py-old", ""])
+    updated = hook.filtered_bash_response({"stdout": stdout, "stderr": ""}, {hide}, {hide, keep}, str(tmp_path))
+    assert updated["stdout"] == "a.py-old:1:x\na.py-old-2-z:w\n--\na.py-old\n"
 
 
 def test_hint_mode_ranks_without_hiding(repo, provider, monkeypatch):
     root, transcript = repo
     monkeypatch.setattr(hook, "MODE", "hint")
+    # Every file was on screen and the list is short: nothing worth an interruption.
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "hint_not_needed"
     # A long list: the order matters even though everything was shown.
     monkeypatch.setattr(hook, "HINT_MIN_FILES", 5)
-    note, event = hook.run(_payload(root, transcript))
-    assert event["outcome"] == "hinted"
-    assert "src/rules.py:1-2 (0.90)" in note  # the best-scored lines, not just the file
-    assert "9 more scored below" in note and "Nothing was hidden" in note
+    output, event = hook.run(_payload(root, transcript))
+    specific = output["hookSpecificOutput"]
+    assert event["outcome"] == "hinted" and "updatedToolOutput" not in specific
+    assert "src/rules.py:1-2 (0.90)" in specific["additionalContext"]  # the best-scored lines, not just the file
+    assert "9 more scored below" in specific["additionalContext"] and "Nothing was hidden" in specific["additionalContext"]
 
 
 def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
@@ -346,28 +408,21 @@ def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
     monkeypatch.setattr(hook, "MODE", "hint")
     payload = _bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
                             stdout="docs/note0.md:1:Enterprise note 0\ndocs/note1.md:1:Enterprise note 1\n")
-    note, event = hook.run(payload)
+    output, event = hook.run(payload)
+    note = output["hookSpecificOutput"]["additionalContext"]
     assert event["outcome"] == "hinted" and event["unseen_top"] == 1
     assert "src/rules.py:1-2 (0.90, not in your output)" in note
 
 
-def test_no_hint_when_the_top_files_were_already_shown(repo, provider, monkeypatch):
-    root, transcript = repo
-    monkeypatch.setattr(hook, "MODE", "hint")
-    payload = _bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
-                            stdout="docs/note0.md:1:Enterprise note 0\nsrc/rules.py:1:def excluded\n")
-    note, event = hook.run(payload)
-    assert note is None and event["outcome"] == "hint_not_needed"
-    assert event["unseen_files"] == 9 and event["unseen_top"] == 0
-
-
-def test_hint_exits_2_with_the_note_on_stderr(monkeypatch, capsys):
-    monkeypatch.setattr(hook, "run", lambda payload: ("Jev hint: x", {"outcome": "hinted"}))
+def test_rewake_delivery_exits_2_with_the_hint_on_stderr(monkeypatch, capsys):
+    note = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Jev relevance hint: x"}}
+    monkeypatch.setattr(hook, "run", lambda payload: (note, {"outcome": "hinted"}))
     monkeypatch.setattr(hook, "_log", lambda event: None)
+    monkeypatch.setattr(hook, "DELIVERY", "rewake")
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps({"tool_name": "Bash"})))
-    assert hook.main() == 2  # asyncRewake hands exit-2 stderr to Claude
+    assert hook.main() == 2
     captured = capsys.readouterr()
-    assert captured.err == "Jev hint: x\n" and captured.out == ""
+    assert captured.err == "Jev relevance hint: x\n" and captured.out == ""
     monkeypatch.setattr(hook, "run", lambda payload: (None, {"outcome": "shadow_ranked"}))
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps({"tool_name": "Bash"})))
     assert hook.main() == 0  # no hint: a silent, successful exit
@@ -375,6 +430,7 @@ def test_hint_exits_2_with_the_note_on_stderr(monkeypatch, capsys):
 
 def test_bash_description_states_the_search_purpose(repo, monkeypatch):
     root, transcript = repo
+    monkeypatch.setattr(hook, "BASH_MIN_BYTES", 0)
     seen = []
     real = engine_module.SearchEngine
 
@@ -392,7 +448,6 @@ def test_bash_description_states_the_search_purpose(repo, monkeypatch):
     _, event = hook.run(payload)
     assert "What this search is for: Find where Enterprise campaigns are excluded" in seen[0]
     assert "Recent user requests, newest last: where are Enterprise" in seen[0]
-    assert "I'll grep for Enterprise" not in seen[0]  # assistant text is stale at hook time
     assert event["intent"] == "description" and event["tool_use_id"] == "tool-1"
 
 
@@ -423,6 +478,7 @@ def test_bash_search_accepts_a_trailing_head(tmp_path, command):
 
 def test_head_cut_output_is_ranked_even_when_small(repo, provider, monkeypatch):
     root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "shadow")
     output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise | head -3",
                                            stdout="docs/note0.md:1:Enterprise\n"))
     assert output is None and event["outcome"] == "shadow_ranked" and event["truncated"] is True
@@ -447,6 +503,7 @@ def test_subagent_calls_read_the_agent_transcript(repo, provider, tmp_path):
 
 def test_nothing_sendable_is_not_reported_as_ranked(repo, provider, monkeypatch):
     root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "shadow")
     monkeypatch.setattr(hook, "snippet_mapper", lambda lines, radius: (lambda fragment: None))
     output, event = hook.run(_payload(root, transcript))
     assert output is None and event["outcome"] == "nothing_evaluated"
