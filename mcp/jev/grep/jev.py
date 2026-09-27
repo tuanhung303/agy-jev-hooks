@@ -15,8 +15,9 @@ from .http import (MAX_PROVIDER_RESPONSE_BYTES, ProviderBodyLimitError, Transpor
 from .policy import batch_limits, fits_serialized_batch
 
 # The question sets the scene and asks directly, naming the data fields; the criteria extend it
-# with the boundary that matters (a word match is not relevance). On labelled grep replays this
-# lifted mean AUC from 0.83-0.84 to 0.91; a worked example in the criteria added nothing.
+# with the boundary that matters: a word match, or similar work in another component or an older
+# copy, is not relevance. On labelled grep replays (5 cases, 2 runs) mean AUC went 0.83 -> 0.91 with
+# the question, then 0.91 -> 0.95 with that boundary; a worked example in the criteria added nothing.
 RELEVANCE_QUESTION = (
     "A developer working on the task in `search_question` is searching the code; `excerpt` is one candidate "
     "location. Should the developer read `excerpt` to make progress on that task? "
@@ -27,9 +28,10 @@ RELEVANCE_CRITERION = (
     "answers only part of the task."
 )
 FALSE_CRITERION = (
-    "`excerpt` only mentions a searched term, or belongs to a different feature that happens to use the same word."
+    "`excerpt` only mentions a searched term, or belongs to a different component or an older copy than the one "
+    "the task names, even when it does similar work."
 )
-CRITERION_VERSION = "criterion-2"  # part of the score cache key: bump on any wording change
+CRITERION_VERSION = "criterion-3"  # part of the score cache key: bump on any wording change
 LAYOUT_VERSION = "layout-b-1"
 PROVIDER_CONTEXT_LIMITS = batch_limits()
 
