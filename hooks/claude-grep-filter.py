@@ -172,8 +172,10 @@ def filtered_response(response, hide_paths):
         return updated
     kept = [line for line in str(response.get("content") or "").split("\n")
             if not any(line.startswith(path + ":") or line.startswith(path + "-") for path in hide_paths)]
-    while kept and kept[0] == "--":
-        kept.pop(0)
+    # Drop separators left leading, trailing or doubled by a hidden file.
+    kept = [line for index, line in enumerate(kept) if line != "--" or (kept[index - 1:index] != ["--"] and index > 0)]
+    while kept and kept[-1] == "--":
+        kept.pop()
     updated["content"] = "\n".join(kept)
     if "numLines" in updated:
         updated["numLines"] = len(kept)
@@ -268,6 +270,9 @@ def _rank(payload, event, tool_input, response, cwd, search_path, matches, start
                 f"{tool_input.get('pattern')!r} scored as relevant to the task; output unchanged.")
         output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}
         return (output if MODE == "filter" else None), {**event, "outcome": "none_relevant"}
+
+    if not hidden:
+        return None, {**event, "outcome": "all_relevant"}
 
     as_shown = {path: os.path.relpath(os.path.join(root, path), cwd) for path in lines}
     by_dir = Counter(path.split("/")[0] for path in hidden)

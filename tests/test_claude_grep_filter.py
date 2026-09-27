@@ -151,7 +151,7 @@ def test_long_scope_lists_fit_the_report_budget(repo, provider):
     for index in range(30):
         folder = deep / f"module_{index:02d}_with_a_long_descriptive_name"
         folder.mkdir(parents=True)
-        (folder / "rules_enterprise_handler.py").write_text("ENTERPRISE = True\n", encoding="utf-8")
+        (folder / "enterprise_handler.py").write_text("ENTERPRISE = True\n", encoding="utf-8")
     output, event = hook.run(_payload(root, transcript, path="src"))
     assert event["outcome"] == "filtered", json.dumps(event)
 
@@ -207,3 +207,91 @@ def test_cover_respects_the_scope_entry_limit():
 def test_query_is_bounded_in_utf8_bytes():
     query = hook.build_query("tại sao " * 2000, "", "x")
     assert len(query.encode("utf-8")) <= 8192
+
+
+def test_count_mode_is_left_alone(repo, provider):
+    root, transcript = repo
+    payload = _payload(root, transcript)
+    payload["tool_response"] = {"mode": "count", "numFiles": 11, "filenames": [], "content": "x:1",
+                                "numMatches": 11}
+    assert hook.run(payload) == (None, {"session": "sess", "mode": "filter", "outcome": "not_applicable"})
+
+
+def test_path_without_a_profile_is_left_alone(tmp_path, repo, provider):
+    _, transcript = repo
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for index in range(9):
+        (outside / f"f{index}.py").write_text("Enterprise\n", encoding="utf-8")
+    output, event = hook.run(_payload(outside, transcript))
+    assert output is None and event["outcome"] == "no_profile"
+
+
+def test_context_lines_and_separators_follow_the_hidden_files():
+    response = {"mode": "content", "numFiles": 0, "filenames": [], "numLines": 7, "content": "\n".join([
+        "a.py-1-before", "a.py:2:match", "--", "b.py-4-before", "b.py:5:match", "--", "c.py:9:match"])}
+    updated = hook.filtered_response(response, {"b.py"})
+    assert updated["content"] == "a.py-1-before\na.py:2:match\n--\nc.py:9:match"
+    assert updated["numLines"] == 4
+    assert hook.filtered_response(response, {"a.py", "c.py"})["content"] == "b.py-4-before\nb.py:5:match"
+
+
+def test_provider_failure_fails_open(repo, monkeypatch):
+    root, transcript = repo
+    real = engine_module.SearchEngine
+
+    class Failing(KeywordProvider):
+        def evaluate_batch(self, batch, is_cancelled=None, timeout_s=None):
+            raise OSError("network down")
+
+    class FailingEngine(real):
+        def __init__(self, loaded, env=None, **kwargs):
+            super().__init__(loaded, env=env, provider=Failing("rules"))
+
+    monkeypatch.setattr(engine_module, "SearchEngine", FailingEngine)
+    events = []
+    monkeypatch.setattr(hook, "_log", events.append)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps(_payload(root, transcript))))
+    assert hook.main() == 0
+    assert events[-1]["outcome"] in ("search_partial", "error")
+    assert not hook._seen_marker(_payload(root, transcript)).exists()  # claim released
+
+
+def test_nested_profile_owns_its_subtree(tmp_path, repo, provider):
+    root, transcript = repo
+    nested = root / "tmp" / "worktrees" / "wt"
+    nested.mkdir(parents=True)
+    for index in range(9):
+        (nested / f"n{index}.md").write_text("Enterprise\n", encoding="utf-8")
+    (nested / "rules_x.py").write_text("ENTERPRISE = 1\n", encoding="utf-8")
+    config = default_configuration(str(root / "tmp" / "worktrees"))
+    config["remote_evaluation_enabled"] = True
+    (tmp_path / "config" / "worktrees.yaml").write_text(dump_configuration_yaml(config), encoding="utf-8")
+    output, event = hook.run(_payload(root, transcript, path="tmp/worktrees/wt"))
+    assert event["outcome"] == "filtered"
+    # Scored under the nested profile: every path is relative to its root.
+    assert "wt/rules_x.py" in provider.sent_paths
+    assert all(path.startswith("wt/") for path in provider.sent_paths)
+
+
+def test_paths_with_spaces_and_unicode(repo, provider):
+    root, transcript = repo
+    odd = root / "src" / "thư mục có dấu"
+    odd.mkdir()
+    (odd / "rules đặc biệt.py").write_text("ENTERPRISE = 1\n", encoding="utf-8")
+    output, event = hook.run(_payload(root, transcript, path="src"))
+    assert event["outcome"] in ("few_files",) or "src/thư mục có dấu/rules đặc biệt.py" in provider.sent_paths
+
+
+def test_nothing_to_hide_is_a_plain_pass_through(repo, monkeypatch):
+    root, transcript = repo
+    real = engine_module.SearchEngine
+
+    class Everything(real):
+        def __init__(self, loaded, env=None, **kwargs):
+            super().__init__(loaded, env=env, provider=KeywordProvider(""))  # "" matches every path
+
+    monkeypatch.setattr(engine_module, "SearchEngine", Everything)
+    output, event = hook.run(_payload(root, transcript))
+    assert output is None and event["outcome"] == "all_relevant"
+    assert not hook._seen_marker(_payload(root, transcript)).exists()
