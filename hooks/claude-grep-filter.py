@@ -550,9 +550,10 @@ def _rank(payload, event, tool_input, response, cwd, search_path, matches, start
         return None, {**event, "outcome": "search_" + str(outcome.get("status"))}
 
     threshold = config["search"]["threshold"]
-    best = {}
-    for path, _, _, score in result.get("fragment_scores") or ():
-        best[path] = max(score, best.get(path, 0.0))
+    best, span = {}, {}
+    for path, start, end, score in result.get("fragment_scores") or ():
+        if score > best.get(path, -1.0):
+            best[path], span[path] = score, (start, end)  # the file's best-scored lines
     if not best:  # every candidate was outside the profile (gitignored, denied) or unreadable
         return None, {**event, "outcome": "nothing_evaluated"}
     ranked = sorted(best, key=lambda p: -best[p])
@@ -572,11 +573,17 @@ def _rank(payload, event, tool_input, response, cwd, search_path, matches, start
         event["unseen_top"] = len(unseen)
         if not unseen and len(best) < HINT_MIN_FILES:
             return None, {**event, "outcome": "hint_not_needed"}
-        note = (f"Jev relevance hint for the search {tool_input.get('pattern')!r} ({len(best)} files): most "
-                "relevant to the task: " + ", ".join(f"{as_shown[p]} {best[p]:.2f}" for p in relevant[:8])
-                + (". Not in the output you saw: " + ", ".join(as_shown[p] for p in unseen) if unseen else "")
-                + (f". {len(hidden)} scored below {threshold} (likely keyword-only matches)" if hidden else "")
-                + ". Nothing was hidden; this is a ranking, not a verdict.")
+        top = relevant[:8]
+        # Print the shared folder once: long absolute paths were over half of the hint's tokens.
+        base = os.path.commonpath([os.path.dirname(as_shown[p]) or "." for p in top]) if len(top) > 1 else ""
+        base = "" if base in ("", ".", "/") else base
+
+        def entry(p):
+            shown = os.path.relpath(as_shown[p], base) if base else as_shown[p]
+            return f"{shown}:{span[p][0]}-{span[p][1]} ({best[p]:.2f}{', not in your output' if p in unseen else ''})"
+        note = (f"Jev hint for the search {tool_input.get('pattern')!r} ({len(best)} files). Most relevant lines, "
+                f"read these first{f' (under {base}/)' if base else ''}: " + ", ".join(entry(p) for p in top)
+                + (f". {len(hidden)} more scored below {threshold}" if hidden else "") + ". Nothing was hidden.")
         return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}, \
             {**event, "outcome": "hinted"}
     if not relevant:

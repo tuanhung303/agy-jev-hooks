@@ -399,8 +399,8 @@ def test_hint_mode_ranks_without_hiding(repo, provider, monkeypatch):
     output, event = hook.run(_payload(root, transcript))
     specific = output["hookSpecificOutput"]
     assert event["outcome"] == "hinted" and "updatedToolOutput" not in specific
-    assert "src/rules.py 0.90" in specific["additionalContext"]
-    assert "9 scored below" in specific["additionalContext"] and "Nothing was hidden" in specific["additionalContext"]
+    assert "src/rules.py:1-2 (0.90)" in specific["additionalContext"]  # the best-scored lines, not just the file
+    assert "9 more scored below" in specific["additionalContext"] and "Nothing was hidden" in specific["additionalContext"]
 
 
 def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
@@ -411,7 +411,7 @@ def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
     output, event = hook.run(payload)
     note = output["hookSpecificOutput"]["additionalContext"]
     assert event["outcome"] == "hinted" and event["unseen_top"] == 1
-    assert "Not in the output you saw: src/rules.py" in note
+    assert "src/rules.py:1-2 (0.90, not in your output)" in note
 
 
 def test_rewake_delivery_exits_2_with_the_hint_on_stderr(monkeypatch, capsys):
