@@ -12,16 +12,9 @@ from .jev import (BatchEvaluation, EvaluationBatch, ProviderClient, ProviderErro
 OPENROUTER_JEV_MODEL = "typesafe/jev-1.13"
 OPENROUTER_BASE_URL = "https://openrouter.ai"
 
-FALSE_CRITERION = "This excerpt contains no concrete evidence useful for investigating the search question."
-
-
 def serialize_openrouter_batch(batch: EvaluationBatch) -> str:
     """Exact wire payload, also used by offline inspection and search planning."""
     payload = build_request_payload(batch, OPENROUTER_JEV_MODEL)
-    questions = {}
-    for question_id, question in payload["questions"].items():
-        questions[question_id] = dict(question, criteria={"true": question["criteria"]["true"], "false": FALSE_CRITERION})
-    payload["questions"] = questions
     payload["provider"] = {"allow_fallbacks": False}
     return serialize_payload(payload)
 

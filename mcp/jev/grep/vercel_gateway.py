@@ -9,7 +9,7 @@ import json
 from typing import Callable, Dict, Optional, Tuple
 
 from .http import TransportResponse, bounded_request
-from .jev import (RELEVANCE_CRITERION, CRITERION_VERSION, LAYOUT_VERSION, BatchEvaluation, EvaluationBatch,
+from .jev import (FALSE_CRITERION, RELEVANCE_CRITERION, BatchEvaluation, EvaluationBatch,
                   InvalidAnswer, ProviderClient, ProviderError, ProviderUsage, TransportCancelled,
                   inspect_response_keys, question_instructions, serialize_payload)
 
@@ -18,9 +18,6 @@ VERCEL_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh"
 
 GATEWAY_PROTOCOL_VERSION = "0.0.1"
 GATEWAY_EVALUATION_SPEC_VERSION = "4"
-
-FALSE_CRITERION = "This excerpt contains no concrete evidence useful for investigating the search question."
-
 
 def _build_gateway_input(batch: EvaluationBatch) -> dict:
     questions = {}
@@ -31,12 +28,7 @@ def _build_gateway_input(batch: EvaluationBatch) -> dict:
             "criteria": {"true": RELEVANCE_CRITERION, "false": FALSE_CRITERION},
         }
     return {
-        "state": {
-            "search_question": batch.query,
-            "criterion": RELEVANCE_CRITERION,
-            "criterion_version": CRITERION_VERSION,
-            "layout": LAYOUT_VERSION,
-        },
+        "state": {"search_question": batch.query},
         "questions": questions,
     }
 

@@ -167,8 +167,18 @@ def test_task_comes_from_the_recent_real_prompts(tmp_path):
     ]), encoding="utf-8")
     # The last three prompts, newest last: a bare "yes, do it" keeps the ones that say what the work is.
     # Assistant text is left out: at hook time the text that led to this call is not written yet.
-    assert hook.task_from_transcript(str(transcript)) == "oldest question\n\nold question\n\nnew question"
-    assert hook.task_from_transcript(str(tmp_path / "missing.jsonl")) == ""
+    assert hook.task_from_transcript(str(transcript)) == ["oldest question", "old question", "new question"]
+    assert hook.task_from_transcript(str(tmp_path / "missing.jsonl")) == []
+
+
+def test_query_tags_each_request_oldest_first():
+    query = hook.build_query(["first ask\n\nsecond paragraph", "yes do it"], "cache", "Find the cache key")
+    assert query == ('<recent_user_requests order="oldest first">\n'
+                     '<request n="1">first ask\n\nsecond paragraph</request>\n<request n="2">yes do it</request>\n'
+                     '</recent_user_requests>\n<search_purpose>Find the cache key</search_purpose>\n'
+                     '<grep_pattern>cache</grep_pattern>\n'
+                     '<question>Which code matching the grep pattern is relevant to this task?</question>')
+    assert hook.build_query([], "x").startswith("<grep_pattern>x</grep_pattern>")
 
 
 def test_cover_respects_the_scope_entry_limit():
@@ -181,7 +191,7 @@ def test_cover_respects_the_scope_entry_limit():
 
 
 def test_query_is_bounded_in_utf8_bytes():
-    query = hook.build_query("tại sao " * 2000, "x")
+    query = hook.build_query(["tại sao " * 2000] * 3, "x")
     assert len(query.encode("utf-8")) <= 8192
 
 
@@ -390,8 +400,8 @@ def test_bash_description_states_the_search_purpose(repo, monkeypatch):
     payload = _bash_payload(root, transcript, "rg -n -i Enterprise")
     payload["tool_input"]["description"] = "Find where Enterprise campaigns are excluded"
     _, event = hook.run(payload)
-    assert "What this search is for: Find where Enterprise campaigns are excluded" in seen[0]
-    assert "Recent user requests, newest last: where are Enterprise" in seen[0]
+    assert "<search_purpose>Find where Enterprise campaigns are excluded</search_purpose>" in seen[0]
+    assert '<request n="1">where are Enterprise' in seen[0]
     assert "I'll grep for Enterprise" not in seen[0]  # assistant text is stale at hook time
     assert event["intent"] == "description" and event["tool_use_id"] == "tool-1"
 
@@ -408,6 +418,7 @@ def test_snippets_keep_only_the_lines_around_matches():
     assert snippet.text == "".join(f"line {n}\n" for n in range(28, 36))
     assert snippet.byte_start == 100 + len("".join(f"line {n}\n" for n in range(10, 28)))
     assert snippet.byte_count == len(snippet.text) and snippet.token_count > 0
+    assert snippet.label == "grep matches on lines 30, 33"
     assert trim(fragment) is None  # an overlapping twin with the same matches is scored once
     assert hook.snippet_mapper({"a.py": {5}}, 2)(fragment) is None  # no match inside: not a candidate
 

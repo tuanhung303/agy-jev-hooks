@@ -96,6 +96,22 @@ def test_batching_respects_serialized_limits():
         build_batches(list(reversed(fragments)), "q", {"model": "jev-1.13.0", "limits": batch_limits()})]
 
 
+def test_every_adapter_sends_the_question_apart_from_the_excerpt():
+    """The question names `search_question` and `excerpt`; the state holds nothing else."""
+    from mcp.jev.grep.openrouter import serialize_openrouter_batch
+    from mcp.jev.grep.vercel_gateway import serialize_gateway_batch
+    batch = _batch(items=1)
+    for body in (serialize_payload(build_request_payload(batch, "jev-1.13.0")),
+                 serialize_openrouter_batch(batch), serialize_gateway_batch(batch)):
+        payload = json.loads(body)
+        assert payload["state"] == {"search_question": "where is expiry handled?"}
+        question = payload["questions"]["src/a.py#L1-L2"]
+        assert "`excerpt`" in question["instructions"]["question"]
+        assert question["instructions"]["excerpt"] == {"file": "src/a.py", "lines": "1-2",
+                                                       "code": "line 1\nline 2\n"}
+        assert set(question["criteria"]) == {"true", "false"}
+
+
 def test_normalize_response_keeps_valid_neighbours():
     batch = _batch()
     body = {

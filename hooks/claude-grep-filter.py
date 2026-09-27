@@ -97,7 +97,7 @@ def task_from_transcript(path):
         with open(path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()[-400:]
     except (OSError, TypeError):
-        return ""
+        return []
     for line in lines:
         try:
             entry = json.loads(line)
@@ -112,13 +112,24 @@ def task_from_transcript(path):
         text = REMINDER.sub("", _text_of(content)).strip()
         if text and not text.startswith(("<local-command", "<command-name>")):
             prompts = prompts[-(RECENT_PROMPTS - 1):] + [text]
-    return "\n\n".join(prompts)[-TASK_CHARS:]
+    kept, budget = [], TASK_CHARS  # the newest prompts keep their text first
+    for text in reversed(prompts):
+        if budget <= 0:
+            break
+        kept.insert(0, text[-budget:])
+        budget -= len(text)
+    return kept
 
 
-def build_query(task, pattern, purpose=""):
-    parts = [f"Recent user requests, newest last: {task}" if task else "",
-             f"What this search is for: {purpose}" if purpose else "",
-             f"Which code matching the grep pattern {pattern!r} is relevant to this task?"]
+def build_query(prompts, pattern, purpose=""):
+    """Tagged sections, oldest request first. Blank-line joins let a prompt's own paragraphs pass
+    for request boundaries; on labelled replays the tags ranked better (AUC 0.87 vs 0.82-0.84),
+    and newest-first order ranked worse."""
+    requests = "\n".join(f'<request n="{n}">{text}</request>' for n, text in enumerate(prompts, 1))
+    parts = [f'<recent_user_requests order="oldest first">\n{requests}\n</recent_user_requests>' if prompts else "",
+             f"<search_purpose>{purpose}</search_purpose>" if purpose else "",
+             f"<grep_pattern>{pattern}</grep_pattern>",
+             "<question>Which code matching the grep pattern is relevant to this task?</question>"]
     query = "\n".join(part for part in parts if part)
     # The contract bounds UTF-8 bytes, not characters (Vietnamese prompts are multi-byte).
     return query.encode("utf-8")[:MAX_QUERY_BYTES].decode("utf-8", "ignore")
@@ -302,7 +313,8 @@ def grep_matches(search_args, search_paths):
 def snippet_mapper(lines, radius):
     """Trim each candidate fragment to the span from `radius` lines before its first match to
     `radius` after its last, and drop fragments with no match or the same matches as an
-    overlapping neighbour. Jev reads less unrelated text (its docs: filter first) and less is sent."""
+    overlapping neighbour. Jev reads less unrelated text (its docs: filter first) and less is sent.
+    The excerpt header names the matched lines, which ranked a little better on labelled replays."""
     from dataclasses import replace
     from mcp.jev.grep.tokens import count_reference_tokens
     seen = set()
@@ -319,8 +331,10 @@ def snippet_mapper(lines, radius):
         text = "".join(rows[skip:end - fragment.start_line + 1])
         byte_start = fragment.byte_start + len("".join(rows[:skip]).encode("utf-8"))
         size = len(text.encode("utf-8"))
+        note = "grep matches on lines " + ", ".join(map(str, found[:12]))
         return replace(fragment, start_line=start, end_line=end, text=text, byte_start=byte_start,
-                       byte_end=byte_start + size, byte_count=size, token_count=count_reference_tokens(text))
+                       byte_end=byte_start + size, byte_count=size, token_count=count_reference_tokens(text),
+                       label=f"{fragment.label}; {note}" if fragment.label else note)
     return trim
 
 
@@ -423,8 +437,8 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
     from mcp.jev.grep.prepare import find_credential_pattern
 
     transcript = agent_transcript(payload)
-    task = task_from_transcript(transcript)
-    query = build_query(task, str(tool_input.get("pattern", "")), tool_input.get("purpose", ""))
+    prompts = task_from_transcript(transcript)
+    query = build_query(prompts, str(tool_input.get("pattern", "")), tool_input.get("purpose", ""))
     event.update({"tool_use_id": payload.get("tool_use_id"), "transcript": transcript,
                   "agent_type": payload.get("agent_type"),
                   "intent": "description" if tool_input.get("purpose") else "prompts"})
