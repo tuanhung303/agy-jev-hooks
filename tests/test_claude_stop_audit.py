@@ -137,6 +137,11 @@ class ClaudeStopAuditTests(unittest.TestCase):
         self.assertFalse(record["reply_in_transcript"])
         self.assertIn("deploy claim", record["claim"])
 
+    def test_compass_judges_the_payload_reply(self):
+        path = self.edit_turn(final="Working on it.")
+        self.run_main(path, last_assistant_message=CLAIM_REPLY)
+        self.compass.assert_called_once_with(path, CLAIM_REPLY)
+
     def test_continuation_of_a_blocked_stop_is_not_audited(self):
         code, _ = self.run_main(self.edit_turn(), stop_hook_active=True)
         self.assertEqual(code, 0)

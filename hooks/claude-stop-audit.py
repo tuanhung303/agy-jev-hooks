@@ -136,14 +136,16 @@ def turn_writes(turn):
     )
 
 
-def compass_hint(transcript_path):
-    """Compass steer text for a supported hard label, else None (fail open)."""
+def compass_hint(transcript_path, reply=None):
+    """Compass steer text for a supported hard label, else None (fail open).
+    reply is the stop payload's copy of the final message: at stop time Claude
+    often has not flushed it to the transcript yet."""
     if os.environ.get("CLAUDE_JEV_GATE") == "0":
         return None
     try:
         from sage.jev.verdict.compass import jev_compass_hint
         return jev_compass_hint(transcript_path,
-                                deadline=time.monotonic() + JEV_GATE_BUDGET_SECONDS)
+                                deadline=time.monotonic() + JEV_GATE_BUDGET_SECONDS, reply=reply)
     except Exception as exc:
         log_record({"ts": _now(), "error": f"compass unavailable: {type(exc).__name__}"})
         return None
@@ -165,7 +167,7 @@ def audit(payload, block):
     verdicts = {"claim": sanitize(claim_contract_hint(reply, turn)) if writes and reply else None}
     # Shadow mode runs Compass on every stop to collect its verdicts too.
     if not (block and verdicts["claim"]):
-        verdicts["compass"] = sanitize(compass_hint(transcript_path))
+        verdicts["compass"] = sanitize(compass_hint(transcript_path, reply))
     decision, gate, steer = "pass", None, None
     for name, text in verdicts.items():
         if not text:

@@ -24,7 +24,8 @@ from sage.jev.evidence.tools import (
     extract_path_from_args,
     normalize_tool_args,
 )
-from sage.jev.evidence.context import _collect_requirements
+from sage.jev.evidence.context import _collect_requirements, _recent_requests
+from sage.user_context import is_real_user_step
 from sage.imgtext import symptom_flags, visual_text_and_flags
 from sage.jev.transport import _bound
 from sage.jev.evidence.redact import REDACT_TIME_BUDGET_S, _RedactBudget, _redact_field
@@ -40,9 +41,12 @@ CONTENT_ARG_KEYS = ("Content", "content", "NewString", "new_string", "Replace", 
 
 BLOCK_BUDGETS = {
     "user_requirements": 6000,
+    "requests": 6500,
     "turn_history": 3000,
     "artifact_diffs": 14000,
     "command_receipts": 10000,
+    "earlier_receipts": 1500,
+    "turn_order": 4000,
     "visual_text": 2000,
     "final_reply": 5000,
 }
@@ -53,6 +57,9 @@ PER_FILE_DIFF_CHARS = 3500    # most recently written file
 ARTIFACT_OLDER_CHARS = 1750   # previously written files
 MAX_STEPS = 400
 MAX_INGEST_BYTES = 16 * 1024 * 1024
+EARLIER_RECEIPTS = 4          # receipts kept from before the judged turn, tail only
+TASK_NOTICE = "<task-notification>"
+TIMELINE_STEPS = 30           # most recent writes and runs of the judged turn, in order
 
 
 class _BoundedSteps(list):
@@ -110,6 +117,10 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
     if omitted_bytes:
         omission = f"[older transcript omitted: {omitted_bytes} bytes]\n" + omission
     budget = _RedactBudget(REDACT_TIME_BUDGET_S)
+    # The judged turn starts at the last real user message (-1: before the kept window);
+    # anything earlier is background, so a failure a later step fixed is not this turn's.
+    full_start = max((i for i, s in enumerate(full_steps) if is_real_user_step(s)), default=-1)
+    turn_start = max(-1, full_start - (len(full_steps) - len(steps)))
     output_ids: Dict[str, Dict[str, Any]] = {}
     duplicate_ids: set = set()
     for step in steps:
@@ -123,16 +134,23 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
         output_ids[oid] = step
     turn_lines: List[str] = []
     diffs: Dict[str, Dict[str, Any]] = {}
-    receipts: List[Tuple[str, str]] = []
+    receipts: List[Tuple[str, str, bool]] = []
     written: set = set()
     inspected: set = set()
     executed: List[str] = []
+    timeline: List[str] = []  # this turn's writes and runs in order: test-first and fix-then-check read it
     final_reply = ""
     turn_no = 0
     for idx, step in enumerate(steps):
         if step.get("type") == "USER_INPUT" and str(step.get("content") or "").strip():
             turn_no += 1
             turn_lines.append(f"T-{turn_no}: user request")
+        # A background job's report (a Monitor event, a finished task) arrives as a harness
+        # notification, not a tool result: it is the receipt for what the reply then states.
+        if idx > turn_start and step.get("type") == "USER_INPUT" and TASK_NOTICE in str(step.get("content") or ""):
+            receipts.append(("[background task notification]",
+                             _redact_field(str(step["content"]).strip(), "task notification", budget), True))
+            timeline.append("notice " + _bound(" ".join(str(step["content"]).split()), 120))
         if step.get("type") != "PLANNER_RESPONSE":
             continue
         if str(step.get("content") or "").strip():
@@ -159,6 +177,8 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
                 target = _redact_field(raw_target, "path", budget)
                 if not target:
                     continue
+                if idx > turn_start:
+                    timeline.append(f"write {_bound(target, 120)}")
                 state = diffs.setdefault(
                     target,
                     {"attempts": 0, "content": "<content not captured>", "outcome": "unknown",
@@ -166,6 +186,7 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
                 )
                 state["attempts"] += 1
                 state["order"] = idx
+                state["earlier"] = idx < turn_start
                 present = _first_str(args, CONTENT_ARG_KEYS)
                 if name in FULL_WRITE_TOOLS:
                     state["full_write"] = True
@@ -195,20 +216,26 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
                 command = _redact_field(raw_command, "command", budget)
                 if not command:
                     continue
+                if idx > turn_start:
+                    timeline.append("run " + _bound(" ".join(command.split()), 120))
                 if result_step is not None:
                     status = _status_of(result_step, str(raw_output or ""))
                     body = _redact_field(str(raw_output or ""), "command output", budget)
-                    receipts.append((f"$ {command}\n[exit={status}]", body))
+                    receipts.append((f"$ {command}\n[exit={status}]", body, idx > turn_start))
                 else:
-                    receipts.append((f"$ {command}\n", "<no unambiguous output captured>"))
+                    receipts.append((f"$ {command}\n", "<no unambiguous output captured>", idx > turn_start))
             elif name in READ_TOOLS:
                 inspected_path = extract_path_from_args(args)
                 if inspected_path:
                     inspected.add(inspected_path)
+    current = [(h, b) for h, b, now in receipts if now]
+    earlier = [(h, b) for h, b, now in receipts if not now][-EARLIER_RECEIPTS:]
     rendered_receipts = []
-    for pos, (header, body) in enumerate(receipts):
-        cap = RECEIPT_FULL_CHARS if pos == len(receipts) - 1 else RECEIPT_TAIL_CHARS
+    for pos, (header, body) in enumerate(current):
+        cap = RECEIPT_FULL_CHARS if pos == len(current) - 1 else RECEIPT_TAIL_CHARS
         rendered_receipts.append(header + "\n" + (body if len(body) <= cap else _tail_lines(body, cap)))
+    rendered_earlier = [header + "\n" + (body if len(body) <= RECEIPT_TAIL_CHARS else _tail_lines(body, RECEIPT_TAIL_CHARS))
+                        for header, body in earlier]
     # Label-matched evidence for blast_radius_unchecked: deterministic AST
     # consumer gap, bounded and fail-open (no guaranteed workspace root here).
     try:
@@ -227,6 +254,8 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
             header += f" receipt: {state['receipt']}"
         if state["stale"]:
             header += " [later patch content not captured]"
+        if state.get("earlier"):
+            header += " [written in an earlier turn]"
         if state["content"] == "" and state["full_write"]:
             body = "<file cleared>"
         elif state["content"] == "":
@@ -235,19 +264,25 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
             body = state["content"]
         cap = PER_FILE_DIFF_CHARS if target == recent_target else ARTIFACT_OLDER_CHARS
         diff_blocks.append(header + "\n" + _bound(_redact_field(body, "artifact", budget), cap))
+    requests = _recent_requests(full_steps, budget)
     requirements = _collect_requirements(full_steps, budget)
     if omission:
         requirements = f"{omission}\n{requirements}"
-    visual, visual_flags = visual_text_and_flags(full_steps)
+        requests = f"{omission}\n{requests}"
+    visual, visual_flags = visual_text_and_flags(steps[turn_start + 1:])
     flags = list(dict.fromkeys(
         visual_flags + symptom_flags("\n".join(rendered_receipts) + "\n" + "\n".join(diff_blocks))))
     flag_line = f"[receipt flags: {', '.join(flags)}]" if flags else ""
     visual_block = "\n".join(part for part in (flag_line, visual) if part) or "<no screenshot receipts>"
     blocks = {
         "user_requirements": _bound(requirements, BLOCK_BUDGETS["user_requirements"]),
+        "requests": requests,
         "turn_history": "\n".join(turn_lines[-30:]) or "<no turns>",
         "artifact_diffs": "\n\n".join(diff_blocks) or "<no file mutations>",
         "command_receipts": "\n\n".join(rendered_receipts[-12:]) or "<no commands run>",
+        "earlier_receipts": "\n\n".join(rendered_earlier) or "<none>",
+        "turn_order": "\n".join(f"{n}. {event}" for n, event in enumerate(timeline[-TIMELINE_STEPS:], start=1))
+        or "<no writes or runs>",
         "visual_text": _bound(visual_block, BLOCK_BUDGETS["visual_text"]),
         "final_reply": _redact_field(final_reply or "<none>", "final reply", budget),
     }
@@ -257,7 +292,8 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
 def build_payload(blocks: Dict[str, str]) -> str:
     """Line-prefixed serialization: evidence cannot forge a block boundary."""
     parts = []
-    for name in ("user_requirements", "turn_history", "artifact_diffs", "command_receipts", "visual_text", "final_reply"):
+    for name in ("user_requirements", "turn_history", "artifact_diffs", "earlier_receipts", "command_receipts",
+                 "visual_text", "final_reply"):
         lines = [f"| {line}" if line.startswith("=== ") else line
                  for line in blocks.get(name, "").splitlines()]
         parts.append(f"=== {name} ===\n" + "\n".join(lines))

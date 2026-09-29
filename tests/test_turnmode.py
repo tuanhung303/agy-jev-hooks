@@ -43,6 +43,19 @@ class TurnModeTests(unittest.TestCase):
         self.assertEqual(turnmode.session_mode([thanks, question]), turnmode.NORMAL_QA)
         self.assertEqual(turnmode.session_mode([thanks]), turnmode.CASUAL_QA)
 
+    def test_current_mode_judges_the_latest_message(self):
+        order = {"type": "USER_INPUT", "content": "fix the bug"}
+        for text, mode in (
+            ("campaign name và campaign tag khác nhau hả", turnmode.NORMAL_QA),  # closing particle
+            ("is the hook still active?", turnmode.NORMAL_QA),
+            ("ok làm tiếp đi em", turnmode.WORK),  # a continuation inherits the working session
+            ("Do you want it on prod? -> yes, and brainstorm what to try next", turnmode.WORK),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(turnmode.current_mode([order, {"type": "USER_INPUT", "content": text}]), mode)
+        self.assertEqual(turnmode.current_mode([{"type": "USER_INPUT", "content": "thanks"}]),
+                         turnmode.CASUAL_QA)
+
 
 if __name__ == "__main__":
     unittest.main()

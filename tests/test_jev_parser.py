@@ -97,15 +97,20 @@ class CatalogTests(unittest.TestCase):
 
 class ParserTests(unittest.TestCase):
     def test_compass_case_expands_q_pass_plus_categories(self):
-        body = build_request("compass", {"evidence": "EV", "last_user": "u", "last_agent": "a"})
+        fields = ("requests", "this_turn_order", "this_turn_files", "this_turn_commands",
+                  "this_turn_screenshots", "earlier_turns", "reply")
+        body = build_request("compass", {name: f"<{name}>" for name in fields})
         self.assertEqual(len(body["questions"]), 24)
         self.assertIn("q_pass", body["questions"])
         self.assertEqual(body["questions"]["undone"]["type"], "boolean")
-        self.assertIn("EV", body["state"]["criterion"])
+        # One state field per kind of evidence, each named by the question.
+        for name in fields:
+            self.assertEqual(body["state"][name], f"<{name}>")
+            self.assertIn(f"`{name}`", body["state"]["search_question"])
 
     def test_missing_placeholder_raises(self):
         with self.assertRaises(ValueError):
-            build_request("compass", {"evidence": "EV"})  # pair placeholders missing
+            build_request("compass", {"requests": "EV"})  # the other evidence fields are missing
 
     def test_router_choice_criteria_from_context(self):
         body = build_request("router", {

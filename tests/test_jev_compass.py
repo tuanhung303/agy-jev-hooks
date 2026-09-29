@@ -11,6 +11,7 @@ from sage.jev.evidence import assemble as jev_compass_evidence
 from sage.jev.evidence import context as jev_compass_context
 from sage.jev.verdict import compass as jev_compass
 from sage.jev.config.catalog import COMPASS_CATEGORIES, ROUTE_FLOORS
+from sage.jev.verdict.support import label_support
 
 
 def _step(stype, content="", tool_calls=None, **extra):
@@ -37,6 +38,10 @@ def _answers(prob_by_cat, answer_type="boolean"):
         "usage": {"inputTokens": 3000, "outputTokens": 120},
     }
 
+
+COMPASS_FIELDS = {name: f"<{name}>" for name in (
+    "requests", "this_turn_order", "this_turn_files", "this_turn_commands",
+    "this_turn_screenshots", "earlier_turns", "reply")}
 
 SAMPLE_STEPS = [
     _step("USER_INPUT", "Write a CSV parser and verify against malformed input."),
@@ -277,7 +282,9 @@ class CompassEvidenceTests(unittest.TestCase):
                 invalid.append(_step("TOOL_OUTPUT", "exit=0", **({"metadata": ref} if metadata else ref)))
         for output in invalid:
             with self.subTest(output=output):
-                receipt = jev_compass.assemble_evidence([call, output])["command_receipts"]
+                blocks = jev_compass.assemble_evidence([call, output])
+                # A USER_INPUT output opens a new turn, which moves the call to earlier_receipts.
+                receipt = blocks["command_receipts"] + blocks["earlier_receipts"]
                 self.assertIn("<no unambiguous output captured>", receipt)
                 self.assertNotIn("[exit=0]", receipt)
         for kind in ("TOOL_OUTPUT", "TOOL_RESPONSE"):
@@ -326,7 +333,7 @@ class CompassEvidenceTests(unittest.TestCase):
         with mock.patch.object(jev_compass_evidence, "MAX_INGEST_BYTES", cap), \
              mock.patch.object(jev_compass, "_call_jev", return_value=_answers({"undone": 0.9})) as backend:
             self.assertIsNotNone(jev_compass.jev_compass_classify(path))
-            payload = backend.call_args.args[0]["criterion"]
+            payload = backend.call_args.args[0]["requests"]
             self.assertIn("older transcript omitted:", payload)
             self.assertIn("bytes]", payload)
             self.assertIn("Do not deploy", payload)
@@ -412,6 +419,83 @@ class CompassEvidenceTests(unittest.TestCase):
         self.assertIn("=== visual_text ===", jev_compass.build_payload(blocks))
 
 
+class CompassTurnScopeTests(unittest.TestCase):
+    """The judged turn starts at the latest real user message; earlier work is background."""
+
+    def _two_turns(self):
+        return [
+            _step("USER_INPUT", "run the loader tests"),
+            _step("PLANNER_RESPONSE", "", [_run_call("pytest tests/test_loader.py", cid="r1")]),
+            _output("2 failed", cid="r1"),
+            _step("USER_INPUT", "ok, fix it and go on"),
+            _step("PLANNER_RESPONSE", "", [_write_call("/w/loader.py", "FIX = 1", cid="w1")]),
+            _output("write ok", cid="w1"),
+            _step("PLANNER_RESPONSE", "", [_run_call("pytest tests/test_loader.py", cid="r2")]),
+            _output("5 passed", cid="r2"),
+            _step("USER_INPUT", "<task-notification>\n<summary>Monitor event: nightly load</summary>\n"
+                                "<event>step 4 done</event>\n</task-notification>", source="SYSTEM"),
+            _step("PLANNER_RESPONSE", "Fixed; 5 passed, and step 4 of the load is done."),
+        ]
+
+    def test_receipts_split_by_turn(self):
+        blocks = jev_compass.assemble_evidence(self._two_turns())
+        self.assertIn("5 passed", blocks["command_receipts"])
+        self.assertNotIn("2 failed", blocks["command_receipts"])
+        self.assertIn("2 failed", blocks["earlier_receipts"])
+
+    def test_old_failure_gives_no_steer_support(self):
+        blocks = jev_compass.assemble_evidence(self._two_turns())
+        self.assertIsNone(label_support("incorrect", blocks))
+
+    def test_task_notification_is_a_receipt_not_a_turn(self):
+        blocks = jev_compass.assemble_evidence(self._two_turns())
+        self.assertIn("[background task notification]", blocks["command_receipts"])
+        self.assertIn("step 4 done", blocks["command_receipts"])
+        self.assertIn("5 passed", blocks["command_receipts"])  # the notification did not open a turn
+
+    def test_turn_order_lists_this_turns_writes_and_runs(self):
+        order = jev_compass.assemble_evidence(self._two_turns())["turn_order"].splitlines()
+        self.assertEqual([line.split(" ")[1] for line in order], ["write", "run", "notice"])
+        self.assertTrue(order[0].startswith("1. write /w/loader.py"))
+
+    def test_requests_tag_the_latest(self):
+        requests = jev_compass.assemble_evidence(self._two_turns())["requests"]
+        self.assertLess(requests.index("run the loader tests"), requests.index("ok, fix it and go on"))
+        self.assertIn("[latest request, answered by this turn] ok, fix it and go on", requests)
+        self.assertNotIn("task-notification", requests)
+
+    def test_earlier_write_is_tagged(self):
+        steps = self._two_turns() + [_step("USER_INPUT", "now tidy the docs"), _step("PLANNER_RESPONSE", "ok")]
+        self.assertIn("[written in an earlier turn]", jev_compass.assemble_evidence(steps)["artifact_diffs"])
+
+    def test_harness_reply_replaces_an_unflushed_one(self):
+        steps = [_step("USER_INPUT", "fix the loader"), _step("PLANNER_RESPONSE", "Looking.")]
+        with mock.patch.object(jev_compass, "_read_steps_bounded", return_value=steps), \
+             mock.patch.object(jev_compass, "_call_jev", return_value=_answers({"undone": 0.1})) as jev:
+            jev_compass.jev_compass_classify("/tmp/x.jsonl", reply="Fixed the loader; 5 passed.")
+        self.assertEqual(jev.call_args.args[0]["reply"], "Fixed the loader; 5 passed.")
+
+
+class CompassSupportTests(unittest.TestCase):
+    def test_expected_failure_that_passed_is_not_a_failure(self):
+        blocks = {"command_receipts": "$ python3 check.py\n[exit=0]\n"
+                                      "{'check': 'task_failed', 'expected': 'FAILED', 'actual': 'FAILED', 'pass': True}\n"
+                                      "R1 task_failed FAILED FAILED True",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "R1 passed."}
+        self.assertIsNone(label_support("incorrect", blocks))
+
+    def test_status_literal_in_code_is_not_a_failure(self):
+        blocks = {"command_receipts": "<no commands run>", "final_reply": "Added the parser.",
+                  "artifact_diffs": "# /w/parse.py (write attempts: 1, latest outcome: success)\n"
+                                    "state = \"SUCCESS\" if ok else \"FAILED\""}
+        self.assertIsNone(label_support("incorrect", blocks))
+
+    def test_real_failure_still_supports(self):
+        blocks = {"command_receipts": "$ pytest -q\n[exit=1]\n3 failed, 9 passed",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "Done."}
+        self.assertIn("3 failed", label_support("incorrect", blocks))
+
+
 class CompassTurnModeTests(unittest.TestCase):
     def _classify(self, steps):
         with mock.patch.object(jev_compass, "_read_steps_bounded", return_value=steps), \
@@ -425,6 +509,20 @@ class CompassTurnModeTests(unittest.TestCase):
         result, jev = self._classify(steps)
         self.assertIsNone(result)
         jev.assert_not_called()
+
+    def test_question_inside_a_working_session_is_not_judged(self):
+        steps = [_step("USER_INPUT", "fix the parser and run the tests"), _step("PLANNER_RESPONSE", "Done."),
+                 _step("USER_INPUT", "campaign name và campaign tag khác nhau hả"),
+                 _step("PLANNER_RESPONSE", "They are the same field.")]
+        result, jev = self._classify(steps)
+        self.assertIsNone(result)
+        jev.assert_not_called()
+
+    def test_continuation_inside_a_working_session_is_judged(self):
+        steps = [_step("USER_INPUT", "fix the parser and run the tests"), _step("PLANNER_RESPONSE", "Working."),
+                 _step("USER_INPUT", "ok go on"), _step("PLANNER_RESPONSE", "Done.")]
+        _, jev = self._classify(steps)
+        jev.assert_called_once()
 
     def test_narrative_turn_never_undone(self):
         steps = [_step("USER_INPUT", "the weather is nice today"),
@@ -442,10 +540,9 @@ class CompassTurnModeTests(unittest.TestCase):
     def test_criterion_credits_covering_receipts(self):
         # Prompt contract: covered claims may not be called undone/not_verified.
         from sage.jev.request.parser import build_request
-        body = build_request("compass", {"evidence": "payload-here",
-                                         "last_user": "u", "last_agent": "a"})
-        self.assertIn("Receipt credit", body["state"]["criterion"])
-        self.assertIn("Thin-but-covered evidence is verified, not missing", body["state"]["criterion"])
+        body = build_request("compass", COMPASS_FIELDS)
+        self.assertIn("a claim counts when a receipt covers it", body["state"]["rules"])
+        self.assertIn("thin but covered evidence is verified", body["state"]["rules"])
 
     def test_axis_scope_rides_each_category_question(self):
         # Two failure axes: completeness (missing/unproven delivery) vs quality
@@ -453,13 +550,13 @@ class CompassTurnModeTests(unittest.TestCase):
         # definitions live once in the shared criterion (long per-question scope
         # paragraphs bury the criterion and misbind the judgment).
         from sage.jev.request.parser import build_request
-        body = build_request("compass", {"evidence": "e", "last_user": "u", "last_agent": "a"})
+        body = build_request("compass", COMPASS_FIELDS)
         self.assertTrue(body["questions"]["undone"]["instructions"].startswith("[completeness] "))
         self.assertTrue(body["questions"]["blast_radius_unchecked"]["instructions"].startswith("[completeness] "))
         self.assertTrue(body["questions"]["code_slop"]["instructions"].startswith("[quality] "))
         self.assertTrue(body["questions"]["tdd_breach"]["instructions"].startswith("[quality] "))
         self.assertIn("Observed evidence fabricates success", body["questions"]["faked_evidence"]["instructions"])
-        self.assertIn("must never raise or lower", body["state"]["criterion"])
+        self.assertIn("never let a failure on one axis raise or lower", body["state"]["rules"])
 
     def test_blast_radius_note_rides_command_receipts(self):
         # Label-matched evidence for blast_radius_unchecked: the deterministic

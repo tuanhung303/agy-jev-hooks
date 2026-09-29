@@ -3,8 +3,9 @@ sage.turnmode - Turn-shape flags: work vs normal-qa vs casual-qa.
 
 Verdict routing must never call a turn "undone" when nothing was ordered:
 normal-qa (question) and casual-qa (narrative, chit-chat) carry no
-deliverable. Any work order keeps the session auditable, so the strongest
-flag across user turns wins.
+deliverable. Any work order keeps the session auditable (session_mode), but
+Compass judges the latest turn: a question asked mid-session is Q&A
+(current_mode).
 """
 import re
 from typing import Any, Dict, List
@@ -27,6 +28,8 @@ _QUESTION_START_RE = re.compile(
     r"như thế nào|nhu the nao|bao nhiêu|bao nhieu|có cách|co cach|ai)\b",
     re.I,
 )
+# Vietnamese questions often end on a particle instead of a question mark.
+_QUESTION_END_RE = re.compile(r"\s(?:hả|hở|nhỉ|nhể|không|ko|k|chưa|à|vậy|thế)\W*$", re.I)
 
 
 def turn_mode(text: str) -> str:
@@ -51,3 +54,19 @@ def session_mode(steps: List[Dict[str, Any]]) -> str:
     if NORMAL_QA in modes:
         return NORMAL_QA
     return CASUAL_QA
+
+
+def current_mode(steps: List[Dict[str, Any]]) -> str:
+    """Flag of the turn being judged. A question asked now is Q&A even inside a
+    working session; a bare continuation ("ok, go on") inherits the session's flag."""
+    from sage.user_context import is_real_user_step
+    users = [s for s in steps or [] if isinstance(s, dict) and is_real_user_step(s)]
+    if not users:
+        return CASUAL_QA
+    text = str(users[-1].get("content") or "").strip()
+    if _WORK_RE.search(text):
+        return WORK
+    # Only a message that ends on its question: "do X? yes, and also Y" is still an order.
+    if text.endswith("?") or _QUESTION_END_RE.search(text):
+        return NORMAL_QA
+    return session_mode(steps)

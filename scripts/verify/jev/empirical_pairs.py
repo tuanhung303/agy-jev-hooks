@@ -44,9 +44,9 @@ def _load_env_file(path: Path) -> None:
 
 _load_env_file(Path.home() / ".config" / "agy" / "sage.env")
 
-from sage.jev.request import prompt_pair  # noqa: E402
 from sage.jev.config.catalog import axis_of, derive_verdicts, load_routing  # noqa: E402
-from sage.jev.evidence.assemble import assemble_evidence, build_payload  # noqa: E402
+from sage.jev.evidence.assemble import assemble_evidence  # noqa: E402
+from sage.jev.verdict.compass import _compass_context  # noqa: E402
 from sage.jev.request.parser import build_request, parse_boolean_answers  # noqa: E402
 from sage.config import JEV_GATE_API_KEY  # noqa: E402
 from sage.jev.transport import _call_jev  # noqa: E402
@@ -103,13 +103,7 @@ def _derive(answers: dict, categories: dict) -> dict:
 
 def run_jev(pair: dict, categories: dict) -> dict:
     steps = _steps(pair)
-    last = prompt_pair.extract_prompt_pair(steps)
-    context = {
-        "evidence": build_payload(assemble_evidence(steps)),
-        "last_user": last["user"],
-        "last_agent": last["agent"],
-    }
-    body = build_request("compass", context)
+    body = build_request("compass", _compass_context(steps, assemble_evidence(steps)))
     started = time.monotonic()
     # Same wall-clock the stop gate gets (sage.jev.verdict.compass's 8s budget), so
     # calibration measures what production allows.

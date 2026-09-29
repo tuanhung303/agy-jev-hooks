@@ -23,6 +23,10 @@ _FAILURE_SUMMARY_RE = re.compile(
     r"\b[1-9]\d*\s+(?:failed|failing|errors?)\b|\berror(?:s)? during collection\b|"
     r"\bno tests ran\b|#\s*fail\s+[1-9]\d*", re.I)
 _FAILED_TOKEN_RE = re.compile(r"\bFAILED\b")
+# Code that names a status ('"FAILED"') handles failures; it is not one.
+_QUOTED_STATUS_RE = re.compile(r"""["']FAILED["']""")
+# A check result that expected the failure and saw it: "expected FAILED, actual FAILED, pass True".
+_PASS_VERDICT_RE = re.compile(r"(?i:\bpass['\"]?\s*[:=]\s*true\b)|\bTrue\s*$")
 _ERROR_KEYWORD_RE = re.compile(r"\b(?:Traceback|AssertionError|SyntaxError|ModuleNotFoundError)\b")
 _RUNNER_RESULT_RE = re.compile(
     r"\b\d+\s+(?:passed|failed|passing|failing)\b|\bFAILED\b|\bexit=0\b|#\s*(?:pass|fail)\s+\d+", re.I)
@@ -46,7 +50,7 @@ def _receipt_lines(paragraph: str) -> List[str]:
 
 def _failure_line(lines: List[str]) -> str:
     for line in lines:
-        if line.startswith(("[", "$ ")):
+        if line.startswith(("[", "$ ")) or _PASS_VERDICT_RE.search(line):
             continue
         if _FAILURE_SUMMARY_RE.search(line) or _FAILED_TOKEN_RE.search(line):
             return line
@@ -70,7 +74,8 @@ def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
         return f"command_receipts: {bounded(lines[0], 90)}{code} -> {bounded(signal, 120)}"
     for line in str(blocks.get("artifact_diffs") or "").splitlines():
         line = line.strip()
-        if line and not line.startswith(("=== ", "# ")) and _failure_line([line]):
+        if line and not line.startswith(("=== ", "# ")) and not _QUOTED_STATUS_RE.search(line) \
+                and _failure_line([line]):
             return f"artifact_diffs: {bounded(line, 160)}"
     return None
 

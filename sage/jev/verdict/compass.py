@@ -23,13 +23,12 @@ from sage.jev.evidence.assemble import (  # noqa: F401  (re-exported for callers
     build_payload,
 )
 from sage.jev.request.parser import build_request
-from sage.jev.request.prompt_pair import extract_prompt_pair
-from sage.jev.transport import _call_jev
+from sage.jev.transport import _bound, _call_jev
 from sage.jev.verdict.support import label_support
 from sage.locking import log_audit
 from sage.sanitizer import redact_secrets
 from sage.user_context import has_stated_requirement
-from sage.turnmode import session_mode
+from sage.turnmode import current_mode
 from sage.config import COMPASS_ENABLED, JEV_GATE_API_KEY
 
 CLASSIFY_TIME_BUDGET_S = 10.0
@@ -48,7 +47,8 @@ COMPASS_ACTIONS: Dict[str, str] = {
 }
 
 
-def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None) -> Optional[str]:
+def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None,
+                     reply: Optional[str] = None) -> Optional[str]:
     """Single actionable steer: top supported hard label + criterion + evidence.
 
     Nonbinding by design: hard-escalate labels focus the caller's inspection
@@ -60,7 +60,11 @@ def jev_compass_hint(transcript_path: str, deadline: Optional[float] = None) -> 
     """
     if not COMPASS_ENABLED or not JEV_GATE_API_KEY:
         return None
-    result = jev_compass_classify(transcript_path, deadline=deadline)
+    return compass_steer(jev_compass_classify(transcript_path, deadline=deadline, reply=reply))
+
+
+def compass_steer(result: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The steer for one classification, or None: see jev_compass_hint."""
     if result is None:
         return None
     hard = result.get("hard_escalate") or []
@@ -120,17 +124,21 @@ def _valid_probability(answer: Any) -> Optional[float]:
 
 
 def _compass_context(steps: List[Dict[str, Any]], blocks: Dict[str, str]) -> Dict[str, Any]:
-    """Placeholder context for the yaml compass case: evidence plus the
-    steering-excluded last prompt pair."""
-    pair = extract_prompt_pair(list(steps))
+    """Placeholder context for the yaml compass case: one field per kind of
+    evidence, so the question reads each by name instead of one flat dump."""
     return {
-        "evidence": build_payload(blocks),
-        "last_user": pair["user"],
-        "last_agent": pair["agent"],
+        "requests": blocks["requests"],
+        "this_turn_order": blocks["turn_order"],
+        "this_turn_files": blocks["artifact_diffs"],
+        "this_turn_commands": blocks["command_receipts"],
+        "this_turn_screenshots": blocks["visual_text"],
+        "earlier_turns": blocks["earlier_receipts"],
+        "reply": blocks["final_reply"],
     }
 
 
-def jev_compass_classify(transcript_path: str, deadline: Optional[float] = None) -> Optional[Dict[str, Any]]:
+def jev_compass_classify(transcript_path: str, deadline: Optional[float] = None,
+                         reply: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Classify a transcript into catalog labels. Shadow-only; fails silent."""
     started = time.monotonic()
     deadline = min(deadline, started + CLASSIFY_TIME_BUDGET_S) if deadline is not None \
@@ -143,11 +151,14 @@ def jev_compass_classify(transcript_path: str, deadline: Optional[float] = None)
         if not has_stated_requirement(steps):
             log_audit("jev_compass skipped: no stated user requirement")
             return None
-        mode = session_mode(steps)
+        mode = current_mode(steps)
         if mode != "work":
             log_audit(f"jev_compass skipped: {mode} turn")
             return None
         blocks = assemble_evidence(steps)
+        if reply and reply.strip():
+            # The harness's own copy of the final reply: the transcript may not hold it yet at stop time.
+            blocks["final_reply"] = _bound(redact_secrets(reply.strip()), BLOCK_BUDGETS["final_reply"])
         payload = build_payload(blocks)
         try:
             body = build_request("compass", _compass_context(steps, blocks))

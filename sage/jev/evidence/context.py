@@ -48,3 +48,17 @@ def _collect_requirements(steps: List[Dict[str, Any]], budget: Optional[_RedactB
     if acks:
         parts.append("[user acks: " + _bound(", ".join(acks), 300) + "]")
     return " ".join(parts)
+
+
+RECENT_REQUESTS = 4  # user requests shown to the judge, oldest first
+REQUEST_CHARS = 1500
+
+
+def _recent_requests(steps: List[Dict[str, Any]], budget: _RedactBudget) -> str:
+    """The last few real user messages, oldest first, the one this turn answers tagged latest."""
+    texts = [str(s.get("content") or "").strip() for s in steps if is_real_user_step(s)]
+    texts = [t for t in texts if t][-RECENT_REQUESTS:]
+    return "\n\n".join(
+        f"[{'latest request, answered by this turn' if n == len(texts) - 1 else 'earlier request'}] "
+        + _bound(_redact_field(text, "user message", budget), REQUEST_CHARS)
+        for n, text in enumerate(texts)) or "<none captured>"
