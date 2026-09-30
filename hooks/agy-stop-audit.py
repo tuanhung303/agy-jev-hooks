@@ -9,6 +9,9 @@ If an audit issue is detected, emits `{"decision": "continue", "reason": "[agy-s
 so the Antigravity language_server re-invokes the agent loop with steering context.
 Otherwise emits `{}` to permit normal termination.
 
+Shadow by default: a fired gate is logged as WOULD_<tag> and the stop passes
+with `{}`. AGY_STOP_AUDIT_MODE=block turns the steer on.
+
 Safety and Loop Prevention:
 1. fullyIdle check: when subagents or background tasks are running (fullyIdle=False),
    the hook exits cleanly without blocking, leaving wakeups to reactive messaging.
@@ -277,6 +280,10 @@ def main():
         action = emit_steer(hint, limit)
         if not action:
             log(f"{tag} suppressed: sanitizer unavailable or failed")
+            sys.stdout.write(json.dumps({}))
+            return 0
+        if os.environ.get("AGY_STOP_AUDIT_MODE") != "block":
+            log(f"WOULD_{tag} session={session_id}: {action}")
             sys.stdout.write(json.dumps({}))
             return 0
         bump_steer_count(session_id)

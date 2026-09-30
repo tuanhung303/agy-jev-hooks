@@ -43,6 +43,10 @@ class HookContractTestCase(unittest.TestCase):
             self.hook, "claim_contract_hint_for", return_value=None)
         self.claims_mock = self.claims.start()
         self.addCleanup(self.claims.stop)
+        # The steer contract below is the block-mode contract; shadow has its own tests.
+        mode = mock.patch.dict(self.hook.os.environ, {"AGY_STOP_AUDIT_MODE": "block"})
+        mode.start()
+        self.addCleanup(mode.stop)
 
     def run_main(self, payload=None, raw_stdin=None):
         """Run hook.main() with canned stdin; return (exit_code, parsed_stdout)."""
@@ -269,6 +273,26 @@ class TranscriptExtractionTests(unittest.TestCase):
         prompt, reply = snippets
         self.assertEqual(prompt, "Please run the tests")
         self.assertEqual(reply, "All tests passed successfully.")
+
+
+class ShadowModeTests(HookContractTestCase):
+    """Without AGY_STOP_AUDIT_MODE=block a fired gate is logged, never steered."""
+
+    def setUp(self):
+        super().setUp()
+        self.hook.os.environ.pop("AGY_STOP_AUDIT_MODE", None)
+
+    def test_fired_gate_passes_and_logs_would_steer(self):
+        self.claims_mock.return_value = "claim gap: no runner result"
+        code, out = self.run_main(self.payload())
+        self.assertEqual((code, out), (0, {}))
+        self.assertIn("WOULD_CLAIM", self.hook.LOG_PATH.read_text())
+
+    def test_shadow_never_spends_the_steer_cap(self):
+        self.claims_mock.return_value = "claim gap: no runner result"
+        for _ in range(3):
+            self.run_main(self.payload())
+        self.assertEqual(self.hook.steer_count(self.payload()["conversationId"]), 0)
 
 
 if __name__ == "__main__":
