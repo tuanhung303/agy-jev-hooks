@@ -12,8 +12,8 @@ semantic_search_code. Any error, a partial scan or an unauthorized path yields
 no hint. A Bash command is ranked only when the hook can mirror it exactly: one
 search command, optionally after `cd DIR &&` and before `| head`, known flags
 only. Jev is called only when a hint can help: some matched file is missing
-from what the agent saw (cut by head or a limit), or the list is long enough
-that order matters.
+from what the agent saw (cut by head or a limit). The hint names only relevant
+files the agent did not see: it judges the ones on screen itself.
 
 Run it as an async hook with asyncRewake: the search never waits, and the hint
 reaches Claude as exit-2 stderr when Jev answers (1-3 s later). A hint that
@@ -46,9 +46,6 @@ MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MIN_FILES", "8"))
 MAX_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_FILES", "60"))  # beyond: too broad, pass through at once
 MAX_BYTES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_BYTES", "600000"))
 BUDGET_S = float(os.environ.get("CLAUDE_GREP_FILTER_BUDGET_S", "60"))
-# A hint is worth an interruption only when it names a relevant file the agent did not see, or
-# orders a list long enough that the order matters.
-HINT_MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_HINT_MIN_FILES", "15"))
 MAX_SCOPE_ENTRIES, MAX_SCOPE_BYTES, MAX_QUERY_BYTES = 32, 4096, 8192  # request contract limits
 TASK_CHARS, RECENT_PROMPTS = 1500, 3
 # Context kept around matches, and snippets scored per file. Jev's time grows with the bytes sent (gateway
@@ -436,8 +433,8 @@ def run(payload):
         return None, {**event, "outcome": "too_broad"}
     seen = {os.path.realpath(path) for path in visible_files(response, matches, cwd)}
     event["unseen_files"] = len(matches) - len(seen)
-    # Every match already on screen and too few to need ordering: no hint could come of a Jev call.
-    if MODE == "hint" and not event["unseen_files"] and len(matches) < HINT_MIN_FILES:
+    # Every match already on screen: the agent judges those itself, so no hint could come of a Jev call.
+    if MODE == "hint" and not event["unseen_files"]:
         return None, {**event, "outcome": "all_shown"}
     return _rank(payload, event, {"pattern": pattern, "purpose": purpose}, seen, cwd, search_path,
                  matches, started)
@@ -534,22 +531,14 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
         return None, {**event, "outcome": "shadow_ranked"}
     if not relevant:
         return None, {**event, "outcome": "none_relevant"}
-    unseen = [p for p in relevant[:3] if os.path.realpath(os.path.join(root, p)) not in seen]
-    event["unseen_top"] = len(unseen)
-    if not unseen and len(best) < HINT_MIN_FILES:
+    unseen = [p for p in relevant if os.path.realpath(os.path.join(root, p)) not in seen]
+    event["unseen_relevant"] = len(unseen)
+    if not unseen:
         return None, {**event, "outcome": "hint_not_needed"}
-    as_shown = {path: _shown(os.path.join(root, path), cwd) for path in relevant}
-    top = relevant[:8]
-    # Print the shared folder once: long absolute paths were over half of the hint's tokens.
-    base = os.path.commonpath([os.path.dirname(as_shown[p]) or "." for p in top]) if len(top) > 1 else ""
-    base = "" if base in ("", ".", "/") else base
-
-    def entry(p):
-        shown = os.path.relpath(as_shown[p], base) if base else as_shown[p]
-        return f"{shown}:{span[p][0]}-{span[p][1]} ({best[p]:.2f}{', not in your output' if p in unseen else ''})"
-    note = (f"Jev hint for the search {tool_input.get('pattern')!r} ({len(best)} files). Most relevant lines, "
-            f"read these first{f' (under {base}/)' if base else ''}: " + ", ".join(entry(p) for p in top)
-            + (f". {low} more scored below {threshold}" if low else "") + ". Nothing was hidden.")
+    # Plain words on purpose: it lands in the agent's context. Order is the rank; scores stay in the log.
+    note = (f"Jev hint: these files match {tool_input.get('pattern')!r} and look relevant to your task, "
+            "but your search output did not show them. Read these lines, best first:\n"
+            + "\n".join(f"  {_shown(os.path.join(root, p), cwd)}:{span[p][0]}-{span[p][1]}" for p in unseen[:8]))
     if turn_ended(transcript, payload.get("tool_use_id")):
         return None, {**event, "outcome": "late_dropped"}
     return note, {**event, "outcome": "hinted"}

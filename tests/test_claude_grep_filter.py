@@ -262,7 +262,7 @@ def test_paths_with_spaces_and_unicode(repo, provider):
 def test_hint_skips_jev_when_every_match_is_already_on_screen(repo, provider, monkeypatch):
     root, transcript = repo
     monkeypatch.setattr(hook, "MODE", "hint")
-    # 11 files, all shown, fewer than HINT_MIN_FILES: no hint could come of it, so Jev is not called.
+    # 11 files, all shown: the agent judges those itself, so Jev is not called.
     output, event = hook.run(_payload(root, transcript))
     assert output is None and event["outcome"] == "all_shown" and event["unseen_files"] == 0
     output, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise"))
@@ -340,15 +340,15 @@ def test_bash_output_paths_resolve_in_every_printed_form(tmp_path):
     assert shown("./a.py-2-context") == shown(f"{a}:3:y") == shown("a.py") == {a}
 
 
-def test_hint_mode_ranks_without_hiding(repo, provider, monkeypatch):
+def test_hint_lists_only_relevant_files_cut_from_the_output(repo, provider, monkeypatch):
     root, transcript = repo
     monkeypatch.setattr(hook, "MODE", "hint")
-    # A long list: the order matters even though everything was shown.
-    monkeypatch.setattr(hook, "HINT_MIN_FILES", 5)
-    note, event = hook.run(_payload(root, transcript))
+    payload = _bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
+                            stdout="docs/note0.md:1:Enterprise note 0\ndocs/note1.md:1:Enterprise note 1\n")
+    note, event = hook.run(payload)
     assert event["outcome"] == "hinted"
-    assert "src/rules.py:1-2 (0.90)" in note  # the best-scored lines, not just the file
-    assert "9 more scored below" in note and "Nothing was hidden" in note
+    assert note == ("Jev hint: these files match 'Enterprise' and look relevant to your task, but your search "
+                    "output did not show them. Read these lines, best first:\n  src/rules.py:1-2")
 
 
 def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
@@ -357,8 +357,8 @@ def test_hint_names_the_relevant_file_head_cut_off(repo, provider, monkeypatch):
     payload = _bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
                             stdout="docs/note0.md:1:Enterprise note 0\ndocs/note1.md:1:Enterprise note 1\n")
     note, event = hook.run(payload)
-    assert event["outcome"] == "hinted" and event["unseen_top"] == 1
-    assert "src/rules.py:1-2 (0.90, not in your output)" in note
+    assert event["outcome"] == "hinted" and event["unseen_relevant"] == 1
+    assert "\n  src/rules.py:1-2" in note
 
 
 def test_no_hint_when_the_top_files_were_already_shown(repo, provider, monkeypatch):
@@ -368,7 +368,7 @@ def test_no_hint_when_the_top_files_were_already_shown(repo, provider, monkeypat
                             stdout="docs/note0.md:1:Enterprise note 0\nsrc/rules.py:1:def excluded\n")
     note, event = hook.run(payload)
     assert note is None and event["outcome"] == "hint_not_needed"
-    assert event["unseen_files"] == 9 and event["unseen_top"] == 0
+    assert event["unseen_files"] == 9 and event["unseen_relevant"] == 0
 
 
 def test_hint_exits_2_with_the_note_on_stderr(monkeypatch, capsys):
@@ -510,8 +510,8 @@ def test_turn_ended_reads_the_turn_end_after_the_call(tmp_path):
 def test_hint_after_the_turn_ended_is_dropped(repo, provider, monkeypatch):
     root, transcript = repo
     monkeypatch.setattr(hook, "MODE", "hint")
-    monkeypatch.setattr(hook, "HINT_MIN_FILES", 5)
     with transcript.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "system", "subtype": "turn_duration"}) + "\n")
-    note, event = hook.run(_payload(root, transcript))
+    note, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
+                                         stdout="docs/note0.md:1:Enterprise note 0\n"))
     assert note is None and event["outcome"] == "late_dropped"
