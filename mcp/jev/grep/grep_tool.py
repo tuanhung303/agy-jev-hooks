@@ -145,7 +145,7 @@ def run(arguments, base, cancel_event=None, env=None, started=None, show_root=Tr
                           for path in sorted(text_matches) for number, text in sorted(text_matches[path].items()))
         body = _join(body, "Binary matches:\n" + binary_list if binary_paths else "",
                      "Unreadable files:\n" + unreadable_list if unreadable_paths else "")
-        return _finish(_join(head, summary, body, warning=warning), event, started, "small")
+        return _finish(_join(head, body, warning=warning), event, started, "small")
 
     scores, reason = _score(request, git_root, text_matches, started, cancel_event, env, event)
     event.update({"scored_files": len(scores)})

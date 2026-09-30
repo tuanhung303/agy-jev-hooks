@@ -91,12 +91,12 @@ def test_ranked_reply_gives_code_for_the_relevant_file_and_lists_the_rest(repo, 
 def test_small_result_is_plain_rg_output_without_jev(repo, provider):
     text, event = call(repo, pattern="Partner")
     assert event["outcome"] == "small" and not provider.sent_paths
-    assert text.endswith("src/rules.py:2:    return campaign in ('Enterprise', 'Partner')")
+    assert "file match." not in text and text.endswith("src/rules.py:2:    return campaign in ('Enterprise', 'Partner')")
 
 
 def test_single_file_path_keeps_the_file_name(repo, provider):
     text, event = call(repo, pattern="Enterprise", path="src/rules.py")
-    assert event["outcome"] == "small" and "1 file match 'Enterprise'" not in text
+    assert event["outcome"] == "small" and "1 file match." not in text
     assert "src/rules.py:2:" in text
 
 

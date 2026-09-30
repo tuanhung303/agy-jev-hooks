@@ -335,7 +335,7 @@ def test_shared_rg_runner_forces_record_shape_after_rg_config(tmp_path, monkeypa
     py.write_text("before\nneedle\nafter\n", encoding="utf-8")
     txt.write_text("before\nneedle\nafter\n", encoding="utf-8")
     config = tmp_path / "ripgreprc"
-    config.write_text(f"{context_flag}\n--type=py\n--glob=*.py\n", encoding="utf-8")
+    config.write_text(f"{context_flag}\n--type=py\n--glob=*.py\n--json\n", encoding="utf-8")
     monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
 
     matches, error = hook.grep_matches(["-e", "needle"], [str(tmp_path)])
