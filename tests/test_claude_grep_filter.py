@@ -458,7 +458,7 @@ def test_subagent_calls_read_the_agent_transcript(repo, provider, tmp_path):
 
 def test_nothing_sendable_is_not_reported_as_ranked(repo, provider, monkeypatch):
     root, transcript = repo
-    monkeypatch.setattr(hook, "snippet_mapper", lambda lines, radius: (lambda fragment: None))
+    monkeypatch.setattr(hook, "snippet_mapper", lambda lines, radius, **_: (lambda fragment: None))
     output, event = hook.run(_payload(root, transcript))
     assert output is None and event["outcome"] == "nothing_evaluated"
 
@@ -515,3 +515,9 @@ def test_hint_after_the_turn_ended_is_dropped(repo, provider, monkeypatch):
     note, event = hook.run(_bash_payload(root, transcript, "rg -n -i Enterprise | head -2",
                                          stdout="docs/note0.md:1:Enterprise note 0\n"))
     assert note is None and event["outcome"] == "late_dropped"
+
+
+def test_bad_regex_is_logged_as_an_rg_error_not_few_files(repo, provider):
+    root, transcript = repo
+    output, event = hook.run(_bash_payload(root, transcript, "rg -n '(unclosed'", stdout=""))
+    assert output is None and event["outcome"] == "rg_error" and "regex" in event["error"].lower()

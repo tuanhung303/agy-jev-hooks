@@ -27,10 +27,8 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +37,8 @@ REPO_DIR = HOOK_DIR.parent
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
+from mcp.jev.grep.grep_rank import build_query, cover, rg_matches, snippet_mapper  # noqa: E402
+
 STATE_DIR = Path(os.environ.get("CLAUDE_GREP_FILTER_STATE") or
                  Path.home() / ".local/state/agy-jev-hooks/claude-grep-filter")
 MODE = os.environ.get("CLAUDE_GREP_FILTER_MODE", "shadow")  # off | shadow | hint
@@ -46,7 +46,6 @@ MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MIN_FILES", "8"))
 MAX_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_FILES", "60"))  # beyond: too broad, pass through at once
 MAX_BYTES = int(os.environ.get("CLAUDE_GREP_FILTER_MAX_BYTES", "600000"))
 BUDGET_S = float(os.environ.get("CLAUDE_GREP_FILTER_BUDGET_S", "60"))
-MAX_SCOPE_ENTRIES, MAX_SCOPE_BYTES, MAX_QUERY_BYTES = 32, 4096, 8192  # request contract limits
 TASK_CHARS, RECENT_PROMPTS = 1500, 3
 # Context kept around matches, and snippets scored per file. Jev's time grows with the bytes sent (gateway
 # requests hold 16 snippets / 64 KB); the file's best snippet decides its rank anyway.
@@ -123,20 +122,6 @@ def task_from_transcript(path):
         kept.insert(0, text[-budget:])
         budget -= len(text)
     return kept
-
-
-def build_query(prompts, pattern, purpose=""):
-    """Tagged sections, oldest request first. Blank-line joins let a prompt's own paragraphs pass
-    for request boundaries; on labelled replays the tags ranked better (AUC 0.87 vs 0.82-0.84),
-    and newest-first order ranked worse."""
-    requests = "\n".join(f'<request n="{n}">{text}</request>' for n, text in enumerate(prompts, 1))
-    parts = [f'<recent_user_requests order="oldest first">\n{requests}\n</recent_user_requests>' if prompts else "",
-             f"<search_purpose>{purpose}</search_purpose>" if purpose else "",
-             f"<grep_pattern>{pattern}</grep_pattern>",
-             "<question>Which code matching the grep pattern is relevant to this task?</question>"]
-    query = "\n".join(part for part in parts if part)
-    # The contract bounds UTF-8 bytes, not characters (Vietnamese prompts are multi-byte).
-    return query.encode("utf-8")[:MAX_QUERY_BYTES].decode("utf-8", "ignore")
 
 
 def grep_tool_args(tool_input):
@@ -302,64 +287,9 @@ def bash_search(command, cwd):
 
 
 def grep_matches(search_args, search_paths):
-    """(absolute path, line) pairs for the given rg pattern and filters."""
-    command = ["rg", "--line-number", "--no-heading", "--with-filename", "--color", "never",
-               *search_args, "--", *search_paths]
-    output = subprocess.run(command, capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
-    matches = defaultdict(set)
-    for line in output.splitlines():
-        found = re.match(r"(.+?):(\d+):", line)
-        if found:
-            matches[found.group(1)].add(int(found.group(2)))
-    return matches
-
-
-def snippet_mapper(lines, radius, per_file=None):
-    """Trim each candidate fragment to the span from `radius` lines before its first match to
-    `radius` after its last, and drop fragments with no match, the same matches as an
-    overlapping neighbour, or beyond the first `per_file` of their file (0: no cap). Jev reads
-    less unrelated text (its docs: filter first) and less is sent. The excerpt header names the
-    matched lines, which ranked a little better on labelled replays."""
-    from dataclasses import replace
-    from mcp.jev.grep.tokens import count_reference_tokens
-    per_file = SNIPPETS_PER_FILE if per_file is None else per_file
-    seen, kept = set(), defaultdict(int)
-
-    def trim(fragment):
-        found = sorted(n for n in lines.get(fragment.path, ()) if fragment.start_line <= n <= fragment.end_line)
-        if not found or (fragment.path, tuple(found)) in seen:
-            return None
-        if per_file and kept[fragment.path] >= per_file:
-            return None
-        seen.add((fragment.path, tuple(found)))
-        kept[fragment.path] += 1
-        start = max(fragment.start_line, found[0] - radius)
-        end = min(fragment.end_line, found[-1] + radius)
-        rows = re.findall(r"[^\n]*\n|[^\n]+$", fragment.text)
-        skip = start - fragment.start_line
-        text = "".join(rows[skip:end - fragment.start_line + 1])
-        byte_start = fragment.byte_start + len("".join(rows[:skip]).encode("utf-8"))
-        size = len(text.encode("utf-8"))
-        note = "grep matches on lines " + ", ".join(map(str, found[:12]))
-        return replace(fragment, start_line=start, end_line=end, text=text, byte_start=byte_start,
-                       byte_end=byte_start + size, byte_count=size, token_count=count_reference_tokens(text),
-                       label=f"{fragment.label}; {note}" if fragment.label else note)
-    return trim
-
-
-def cover(paths, limit=MAX_SCOPE_ENTRIES, max_bytes=MAX_SCOPE_BYTES):
-    """Scope entries covering every path within the contract's entry and byte limits:
-    collapse the deepest entries to their parents until both fit."""
-    entries = set(paths)
-    while len(entries) > limit or sum(len(entry.encode("utf-8")) for entry in entries) > max_bytes:
-        deepest = max(entry.count("/") for entry in entries)
-        if deepest == 0:
-            return ["."]
-        entries = {entry.rsplit("/", 1)[0] if entry.count("/") == deepest else entry
-                   for entry in entries}
-        entries = {entry for entry in entries
-                   if not any(entry != other and entry.startswith(other + "/") for other in entries)}
-    return sorted(entries)
+    """(absolute path -> matched line numbers, rg's error or None) for the given rg pattern and filters."""
+    found, error, _ = rg_matches(search_args, search_paths)
+    return {path: set(lines) for path, lines in found.items()}, error
 
 
 def _shown(absolute, cwd):
@@ -425,7 +355,9 @@ def run(payload):
         return None, {**event, "outcome": "not_applicable"}
 
     search_path = search_paths[0] if len(search_paths) == 1 else os.path.commonpath(search_paths)
-    matches = grep_matches(search_args, search_paths)
+    matches, rg_error = grep_matches(search_args, search_paths)
+    if rg_error:  # a bad regex or path: the agent sees rg's own error, there is nothing to rank
+        return None, {**event, "outcome": "rg_error", "error": rg_error[:200]}
     event["matched_files"] = len(matches)
     if len(matches) < MIN_FILES:
         return None, {**event, "outcome": "few_files"}
@@ -504,7 +436,7 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
         # The response stays in-process, so reserve the largest budget: the report
         # envelope alone grows with the scope list.
         {"query": query, "scope": cover(lines), "max_context_tokens": config["search"]["max_response_tokens"]},
-        {"fragment_map": snippet_mapper(lines, SNIPPET_LINES)})
+        {"fragment_map": snippet_mapper(lines, SNIPPET_LINES, per_file=SNIPPETS_PER_FILE)})
     outcome = result["outcome"]
     report = outcome.get("report") or {}
     event.update({"status": outcome.get("status"), "error": (outcome.get("error") or {}).get("code"),

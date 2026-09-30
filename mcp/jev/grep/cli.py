@@ -211,7 +211,16 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--config")
     cache.set_defaults(func=command_cache)
 
+    mcp = sub.add_parser("mcp", help="stdio MCP server with the jev_grep tool (rg ranked for a task)")
+    mcp.set_defaults(func=command_mcp)
+
     return parser
+
+
+def command_mcp(args) -> int:
+    from .grep_server import serve
+    serve()
+    return 0
 
 
 def main(argv: Optional[list] = None) -> int:

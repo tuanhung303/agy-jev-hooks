@@ -88,7 +88,7 @@ def auc(best, truth):
 def run_case(hook, case, corpus, build_query):
     from mcp.jev.grep.config import find_profile_for, load_configuration
     from mcp.jev.grep.engine import SearchEngine
-    matches = hook.grep_matches(["-e", case["pattern"]], [str(corpus)])
+    matches, _ = hook.grep_matches(["-e", case["pattern"]], [str(corpus)])
     loaded = load_configuration(find_profile_for(cwd=str(corpus)))
     root = loaded["repository_root"]
     lines = {os.path.relpath(os.path.realpath(path), root): found for path, found in matches.items()}
@@ -101,7 +101,7 @@ def run_case(hook, case, corpus, build_query):
     result = SearchEngine(loaded, env=dict(os.environ)).search(
         {"query": build_query(case["prompts"], case["pattern"], case.get("purpose", "")),
          "scope": hook.cover(lines), "max_context_tokens": config["search"]["max_response_tokens"]},
-        {"fragment_map": hook.snippet_mapper(lines, hook.SNIPPET_LINES)})
+        {"fragment_map": hook.snippet_mapper(lines, hook.SNIPPET_LINES, per_file=hook.SNIPPETS_PER_FILE)})
     report = result["outcome"].get("report") or {}
     best = {}
     for path, _, _, score in result.get("fragment_scores") or ():

@@ -42,6 +42,7 @@ payload shape change) in `mcp/jev/grep/jev.py`, then add a row below.
 | 2026-09-28 | criterion-3: false = "other component or an older copy" (shipped) | 0.931 / 0.898 | 6/10, 6/10 | 10/10, 10/10 |
 | 2026-09-30 | criterion-3, at most 2 snippets per file (shipped; 480 KB vs 752 KB sent) | 0.922 / 0.907 | 6/10, 6/10 | 9/10, 10/10 |
 | 2026-09-30 | criterion-3, ±5 lines around matches instead of ±12 (rejected) | 0.814 / 0.827 | 5/10, 5/10 | 8/10, 9/10 |
+| 2026-09-30 | criterion-3, the 2 snippets per file with the most matches instead of the first 2 (rejected; 519 KB) | 0.895 / 0.897 | 5/10, 5/10 | 9/10, 9/10 |
 | 2026-09-28 | criterion-2: false = "different feature that happens to use the same word" | 0.874 / 0.886 | 4/10, 5/10 | 8/10, 9/10 |
 
 Earlier results, measured on the live working tree before the bench existed

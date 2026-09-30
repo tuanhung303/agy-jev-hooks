@@ -1,5 +1,11 @@
 # Archived: jevgrep MCP server
 
+Superseded on 2026-09-30 by the `jev_grep` tool (`jevgrep mcp`, code in
+`mcp/jev/grep/grep_server.py` and `grep_tool.py`): rg finds every match, Jev
+ranks the matched files for the agent's task, and the reply keeps every file.
+It needs no per-repository profile (one `defaults.yaml`) and runs calls
+concurrently instead of queueing them behind a BUSY limit.
+
 Retired on 2026-09-28. The `semantic_search_code` MCP tool and the "search with
 jevgrep first" prompt rules are removed from every harness (Claude, agy, Qoder,
 ZCode). Agents search with Grep, and the Claude Code PostToolUse hook

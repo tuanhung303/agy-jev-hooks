@@ -227,8 +227,10 @@ def configuration_fingerprint(config: dict, repository_root: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
-def load_configuration(config_path: str, env: Optional[dict] = None, cwd: Optional[str] = None) -> dict:
-    """Read and validate one trusted configuration file (YAML)."""
+def load_configuration(config_path: str, env: Optional[dict] = None, cwd: Optional[str] = None,
+                       repository_root: Optional[str] = None) -> dict:
+    """Read and validate one trusted configuration file (YAML). A given repository_root replaces
+    the file's own: one defaults file then serves any folder (jev_grep)."""
     from sage.jev.config.yaml_lite import safe_load
 
     absolute = os.path.abspath(os.path.join(cwd or os.getcwd(), config_path))
@@ -243,6 +245,8 @@ def load_configuration(config_path: str, env: Optional[dict] = None, cwd: Option
         parsed = safe_load(text)
     except ValueError:
         raise ConfigurationError("INVALID_CONFIG", f"{absolute} is not valid YAML") from None
+    if repository_root is not None and isinstance(parsed, dict):
+        parsed = {**parsed, "repository_root": repository_root}
 
     try:
         config = validate_configuration(parsed)
@@ -270,6 +274,16 @@ def load_configuration(config_path: str, env: Optional[dict] = None, cwd: Option
             "repository_root": repository_root, "source_root": source_root,
             "cache_directory": cache_directory,
             "fingerprint": configuration_fingerprint(config, repository_root)}
+
+
+DEFAULTS_FILE = "defaults.yaml"
+
+
+def load_defaults_for(repository_root: str, env: Optional[dict] = None) -> dict:
+    """The configuration for any folder: `defaults.yaml` in the config directory, rooted at
+    repository_root. It has no repository_root of its own, so profile lookup skips it."""
+    return load_configuration(os.path.join(config_directory(env), DEFAULTS_FILE), env=env,
+                              repository_root=repository_root)
 
 
 def find_profile_for(cwd: Optional[str] = None, env: Optional[dict] = None) -> str:
