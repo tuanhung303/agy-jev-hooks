@@ -1,11 +1,6 @@
-"""Thin CLI over the shared engine (init, doctor, inspect, search, cache).
+"""CLI and stdio MCP server for JevGrep; `grep` shares the ranked reply with `jev_grep`.
 
-The stdio MCP server was retired on 2026-09-28; its code is in archive/jevgrep-mcp/.
-
-Exit codes: 0 complete, 2 rejected or invalid request/config, 3 partial,
-4 fatal runtime failure, 130 interrupted. Results to stdout, diagnostics to
-stderr. This CLI validates input and presents output; it contains no search
-logic.
+`grep` exits 0 for results, 1 for no matches, 2 for invalid input or rg errors, and 130 when interrupted.
 """
 import argparse
 import json
@@ -14,10 +9,9 @@ import sys
 import time
 from typing import Optional
 
-from . import __version__
 from .config import (ConfigurationError, config_directory, default_configuration, doctor_report,
                      dump_configuration_yaml, find_profile_for, load_configuration,
-                     render_doctor_report, resolve_credential, resolve_scoped_profile)
+                     render_doctor_report, resolve_scoped_profile)
 
 
 def _load(args):

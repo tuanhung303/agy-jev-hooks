@@ -490,6 +490,16 @@ def test_snippets_are_capped_per_file():
     assert all(uncapped(fragment(s)) is not None for s in (1, 11, 21))
 
 
+def test_hook_keeps_the_agents_ripgrep_config(tmp_path, monkeypatch):
+    path = tmp_path / "pattern.py"
+    path.write_text("axb\na.b\n", encoding="utf-8")
+    config = tmp_path / "rg.conf"
+    config.write_text("--fixed-strings\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    found, error = hook.grep_matches(["-e", "a.b"], [str(path)])
+    assert error is None and found == {str(path): {2}}
+
+
 def _turn(tmp_path, *entries):
     path = tmp_path / "turn.jsonl"
     path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")

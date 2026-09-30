@@ -48,24 +48,27 @@ def cover(paths, limit=MAX_SCOPE_ENTRIES, max_bytes=MAX_SCOPE_BYTES):
 SNIPPETS_PER_FILE = 2  # the file's best snippet decides its rank; the prompt bench measured this cap
 
 
-def snippet_mapper(lines, radius, per_file=SNIPPETS_PER_FILE):
-    """Trim each candidate fragment to the span from `radius` lines before its first match to
-    `radius` after its last, and drop fragments with no match, the same matches as an
-    overlapping neighbour, or beyond the first `per_file` of their file (0: no cap). Keeping the
-    most-matched snippets instead of the first ones ranked worse on the bench. Jev reads less
-    unrelated text (its docs: filter first) and less is sent. The excerpt header names the matched lines, which ranked a little
-    better on labelled replays."""
+def snippet_mapper(lines, radius, per_file=SNIPPETS_PER_FILE, include_last=False):
+    """Trim around matches, drop duplicate or empty fragments, and cap each file.
+
+    Optionally retain one fragment covering its last match; Jev reads less unrelated text.
+    """
     from .tokens import count_reference_tokens
-    seen, kept = set(), defaultdict(int)
+    seen, kept, kept_last = set(), defaultdict(int), set()
+    last = {path: max(found) for path, found in lines.items() if found} if include_last else {}
 
     def trim(fragment):
         found = sorted(n for n in lines.get(fragment.path, ()) if fragment.start_line <= n <= fragment.end_line)
         if not found or (fragment.path, tuple(found)) in seen:
             return None
+        is_last = fragment.start_line <= last.get(fragment.path, -1) <= fragment.end_line
         if per_file and kept[fragment.path] >= per_file:
-            return None
+            if not include_last or not is_last or fragment.path in kept_last:
+                return None
         seen.add((fragment.path, tuple(found)))
         kept[fragment.path] += 1
+        if is_last:
+            kept_last.add(fragment.path)
         start = max(fragment.start_line, found[0] - radius)
         end = min(fragment.end_line, found[-1] + radius)
         rows = re.findall(r"[^\n]*\n|[^\n]+$", fragment.text)
@@ -80,10 +83,10 @@ def snippet_mapper(lines, radius, per_file=SNIPPETS_PER_FILE):
     return trim
 
 
-def _rg(filters, paths, counts, parser, cwd, timeout_s, max_bytes):
-    options = (["--count", "--with-filename"] if counts else
-               ["--line-number", "--with-filename", "--no-heading", "--color", "never",
-                "--max-columns", "300", "--max-columns-preview"])
+def _rg(filters, paths, counts, cwd, timeout_s, max_bytes):
+    options = ["--color", "never"] + (["--count", "--with-filename"] if counts else
+                                        ["--line-number", "--with-filename", "--no-heading",
+                                         "--max-columns", "300", "--max-columns-preview"])
     command = ["rg", *options, "--null", *filters, "--", *paths]
     try:
         process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -111,61 +114,34 @@ def _rg(filters, paths, counts, parser, cwd, timeout_s, max_bytes):
     finally:
         timer.cancel()
     complete = not stopped.is_set()
-    records = parser(output, cwd)
-    return records, _rg_error(code, stderr, records, complete), complete
+    records = _records(output, cwd, counts)
+    error = ("rg could not read some files." if records else stderr.strip() or "rg failed") if code == 2 else None
+    return records, error, complete
 
 
-def _rg_error(code, stderr, records, complete):
-    if code == 2 and not records and complete:
-        lines = [line for line in stderr.strip().splitlines() if line.strip()]
-        return "\n".join(lines[:6]) or "rg failed"
-
-
-def _count_records(output, cwd):
-    records = {}
-    position = 0
-    while position < len(output):
-        nul = output.find(b"\0", position)
-        end = output.find(b"\n", nul + 1)
-        if nul < 0 or end < 0:
-            break
+def _records(output, cwd, counts):
+    records = {} if counts else defaultdict(dict)
+    for match in re.finditer(rb"(.*?)\0([0-9]+)(?::([^\n]*))?\n", output, re.S):
         try:
-            name = output[position:nul].decode("utf-8")
-            records[os.path.abspath(os.path.join(cwd or "", name))] = int(output[nul + 1:end].strip())
+            path = os.path.abspath(os.path.join(cwd or "", match[1].decode("utf-8")))
+            number = int(match[2])
         except (UnicodeDecodeError, ValueError):
-            pass
-        position = end + 1
-    return records
-
-
-def _line_records(output, cwd):
-    records = defaultdict(dict)
-    position = 0
-    while position < len(output):
-        nul = output.find(b"\0", position)
-        end = output.find(b"\n", nul + 1)
-        if nul < 0 or end < 0:
-            break
-        try:
-            name = output[position:nul].decode("utf-8")
-            path = os.path.abspath(os.path.join(cwd or "", name))
-            number, separator, text = output[nul + 1:end].partition(b":")
-            if separator:
-                records[path][int(number)] = text.rstrip(b"\r").decode("utf-8", "replace")
-        except (UnicodeDecodeError, ValueError):
-            pass
-        position = end + 1
-    return dict(records)
+            continue
+        if counts:
+            records[path] = number
+        elif match[3] is not None:
+            records[path][number] = match[3].rstrip(b"\r").decode("utf-8", "replace")
+    return records if counts else dict(records)
 
 
 def rg_matches(filters, paths, cwd=None, timeout_s=15.0, max_bytes=RG_MAX_BYTES):
     """Return absolute paths to matched line numbers and text, an error, and completeness."""
-    return _rg(filters, paths, False, _line_records, cwd, timeout_s, max_bytes)
+    return _rg(filters, paths, False, cwd, timeout_s, max_bytes)
 
 
 def rg_file_counts(filters, paths, cwd=None, timeout_s=15.0, max_bytes=RG_MAX_BYTES):
     """Return {path: line_count}, rg error, and whether the complete count output arrived."""
-    return _rg(filters, paths, True, _count_records, cwd, timeout_s, max_bytes)
+    return _rg(filters, paths, True, cwd, timeout_s, max_bytes)
 
 
 def elapsed(started):

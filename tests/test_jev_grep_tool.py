@@ -10,7 +10,8 @@ import pytest
 from mcp.jev.grep import engine as engine_module
 from mcp.jev.grep import grep_server, grep_tool
 from mcp.jev.grep.config import default_configuration, dump_configuration_yaml
-from mcp.jev.grep.grep_rank import rg_matches
+from mcp.jev.grep.chunker import PreparedFragment
+from mcp.jev.grep.grep_rank import rg_matches, snippet_mapper
 from mcp.jev.grep.jev import BatchEvaluation, ProviderError, ProviderUsage, build_request_payload, serialize_payload
 
 
@@ -80,7 +81,7 @@ def test_ranked_reply_gives_code_for_the_relevant_file_and_lists_the_rest(repo, 
     assert event["outcome"] == "ranked" and event["matched_files"] == 7
     lines = text.splitlines()
     assert lines[0] == f"root: {repo}"
-    assert "7 files match 'Enterprise'. Ranked." in text
+    assert "7 files match Enterprise. Ranked." in text
     assert "src/rules.py:1-2 (matches: 2)\n```\n1  def excluded(campaign):" in text
     listed = text.split("Other matches:\n")[1].splitlines()
     assert sorted(listed) == [f"docs/note{i}.md: 2" for i in range(6)]  # low scores: listed, no code
@@ -106,7 +107,7 @@ def test_bad_regex_returns_rg_error_not_no_matches(repo, provider):
 
 def test_no_match_says_so(repo, provider):
     text, event = call(repo, pattern="Nowhere", path="docs")
-    assert event["outcome"] == "none" and "No matches for 'Nowhere' under docs." in text
+    assert event["outcome"] == "none" and "No matches for Nowhere under docs." in text
 
 
 def test_too_broad_lists_and_asks_to_narrow(repo, provider, monkeypatch):
@@ -196,11 +197,59 @@ def test_rg_records_preserve_newline_and_colon_paths(repo, provider):
     assert event["matched_files"] == 1 and "with\nnewline:a.py:1:needle = 1" in text
 
 
+def test_rg_config_cannot_color_counted_paths(repo, provider, tmp_path, monkeypatch):
+    path = repo / "plain.py"
+    path.write_text("needle\n", encoding="utf-8")
+    config = tmp_path / "rg.conf"
+    config.write_text("--color=always\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    counts, error, complete = grep_tool.rg_file_counts(["-e", "needle"], [str(path)])
+    assert error is None and complete and counts == {str(path): 1}
+
+
+def test_jev_grep_ignores_ripgrep_config(repo, tmp_path, monkeypatch):
+    path = repo / "plain.py"
+    path.write_text("axb\na.b\n", encoding="utf-8")
+    config = tmp_path / "rg.conf"
+    config.write_text("--fixed-strings\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    text, event = grep_tool.run({"pattern": "a.b", "task": "find matching lines", "path": "plain.py"}, str(repo))
+    assert event["outcome"] == "small" and "plain.py:1:axb" in text and "plain.py:2:a.b" in text
+
+
+def test_binary_matches_are_listed_and_never_sent_to_jev(repo, provider, monkeypatch, capsys):
+    from mcp.jev.grep import cli
+    binary = repo / "payload.py"
+    binary.write_bytes(b"needle" + b"x" * 500 + b"\0tail\n")
+    monkeypatch.chdir(repo)
+    assert cli.main(["grep", "needle", "--task", "find matching source"]) == 0
+    assert "payload.py (binary)" in capsys.readouterr().out
+    assert provider.sent_paths == set()
+
+
+def test_nul_anywhere_marks_file_binary_before_rendering_or_scoring(repo, provider):
+    path = repo / "around-nul.py"
+    path.write_bytes(b"needle = 1\n" + b"x\0y\n" + b"needle = 2\n")
+    text, event = call(repo, pattern="needle")
+    assert event["outcome"] == "binary"
+    assert "around-nul.py (binary)" in text
+    assert "needle =" not in text and provider.sent_paths == set()
+
+
 def test_rg_exit_two_keeps_records_from_readable_paths(repo):
     valid = repo / "docs" / "readable.txt"
     valid.write_text("needle\n", encoding="utf-8")
     found, error, complete = grep_tool.rg_matches(["-e", "needle"], [str(valid), str(repo / "missing")])
-    assert complete and error is None and found[str(valid)] == {1: "needle"}
+    assert complete and error == "rg could not read some files." and found[str(valid)] == {1: "needle"}
+
+
+def test_partial_rg_read_warning_survives_into_reply_and_event(repo, provider, monkeypatch):
+    path = repo / "src" / "rules.py"
+    monkeypatch.setattr(grep_tool, "rg_file_counts",
+                        lambda *a, **k: ({str(path): 1}, "rg could not read some files.", True))
+    text, event = call(repo, pattern="Enterprise")
+    assert "rg could not read some files." in text
+    assert event["rg_warning"] == "rg could not read some files."
 
 
 def test_rg_line_output_is_bounded_separately_from_jev_payload(repo):
@@ -286,6 +335,15 @@ def test_too_broad_shows_folder_counts_and_no_file_list(repo, provider, monkeypa
     assert "docs/: 6" in text and "(top level): 1" in text and "root.py" not in text and not provider.sent_paths
 
 
+def test_too_broad_partial_read_qualifies_count_and_keeps_warning(repo, provider, monkeypatch):
+    monkeypatch.setattr(grep_tool, "MAX_FILES", 5)
+    monkeypatch.setattr(grep_tool, "rg_file_counts", lambda *a, **k: (
+        {f"/repo/f{i}.py": 1 for i in range(6)}, "rg could not read some files.", True))
+    text, event = call(repo, pattern="Enterprise")
+    assert "at least 6 matching files" in text
+    assert "rg could not read some files." in text and event["rg_warning"]
+
+
 def test_incomplete_count_or_match_phase_never_ranks_partial_files(repo, provider, monkeypatch):
     real_counts = grep_tool.rg_file_counts
     monkeypatch.setattr(grep_tool, "rg_file_counts", lambda *a, **k: ({"/repo/a.py": 1}, None, False))
@@ -311,6 +369,51 @@ def test_low_scores_show_keyword_match_lines(repo, provider):
     assert event["outcome"] == "ranked"
     assert "Best keyword matches, not judged relevant:" in text
     assert "docs/note0.md:2:Enterprise note 0" in text
+    assert "docs/note0.md: 2" not in text.split("Other matches:\n", 1)[-1]
+    assert "docs/note1.md: 2" not in text.split("Other matches:\n", 1)[-1]
+
+
+def test_low_score_preview_reports_omitted_matching_lines(repo, provider):
+    matches = {"docs/note0.md": {n: f"needle {n}" for n in range(1, 21)},
+               "docs/note1.md": {n: f"needle {n}" for n in range(1, 11)}}
+    scores = {path: (0.1, 1, 2) for path in matches}
+    text = grep_tool._render(str(repo), str(repo), "", "2 files match needle", matches, list(matches),
+                             scores, None, 0.5)
+    assert "docs/note0.md:1:needle 1" in text
+    assert "+15 more" in text
+    assert text.index("docs/note0.md: +15 more") < text.index("docs/note1.md:1:needle 1")
+    assert "Other matches:" not in text
+
+
+def test_code_block_shows_twenty_lines_and_other_match_lines(repo):
+    path = repo / "wide.py"
+    path.write_text("".join(f"line {n}\n" for n in range(1, 101)), encoding="utf-8")
+    block = grep_tool._code_block(str(repo), str(repo), "wide.py", {5: "line 5", 50: "line 50", 99: "line 99"},
+                                  (0.9, 1, 20))
+    code = block.split("```\n", 1)[1].split("\n```", 1)[0]
+    assert len(code.splitlines()) <= 20
+    assert "also:\n50: line 50\n99: line 99" in block
+    many = {n: f"line {n}" for n in range(1, 28)}
+    block = grep_tool._code_block(str(repo), str(repo), "wide.py", many, (0.9, 1, 20))
+    assert "wide.py:1-20 (27 matches)" in block
+    assert "(matches: 1, 2" not in block and "+2 more" in block
+
+
+def test_pattern_is_rendered_as_supplied(repo, provider):
+    text, _ = call(repo, pattern=r"ref\(")
+    assert r"No matches for ref\(" in text
+    assert "'ref\\\\('" not in text
+
+
+def test_grep_last_fragment_is_opt_in_and_preserves_hook_cap():
+    fragments = [PreparedFragment(str(start), "module.py", "hash", start, end, 0, 0,
+                                  "".join(f"line {n}\n" for n in range(start, start + 10)), 0, 1, "test")
+                 for start, end in ((1, 10), (81, 90), (280, 290), (285, 295))]
+    def selected(mapper):
+        return [fragment for item in fragments if (fragment := mapper(item)) is not None]
+    lines = {"module.py": {5, 85, 286, 291}}
+    assert len(selected(snippet_mapper(lines, 1))) == 2
+    assert [fragment.start_line for fragment in selected(snippet_mapper(lines, 1, include_last=True))] == [4, 84, 285]
 
 
 def test_rg_matches_reports_errors_and_names_single_files(tmp_path):
