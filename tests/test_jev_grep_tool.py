@@ -212,3 +212,12 @@ def test_server_turns_bad_input_into_a_tool_error_and_drops_cancelled_calls():
 def test_base_folder_prefers_explicit_roots(tmp_path):
     assert grep_server.base_folder({"JEV_GREP_ROOT": str(tmp_path)}) == str(tmp_path.resolve())
     assert grep_server.base_folder({"CLAUDE_PROJECT_DIR": str(tmp_path)}) == str(tmp_path.resolve())
+
+
+def test_cli_grep_prints_the_same_reply(repo, provider, monkeypatch, capsys, tmp_path):
+    from mcp.jev.grep import cli
+    monkeypatch.setattr(grep_server, "STATE_DIR", tmp_path / "state")
+    monkeypatch.chdir(repo)
+    assert cli.main(["grep", "Enterprise", "--task", "where are Enterprise campaigns excluded?"]) == 0
+    assert capsys.readouterr().out.strip() == call(repo, pattern="Enterprise")[0]
+    assert cli.main(["grep", "x", "missing", "--task", "t"]) == 2

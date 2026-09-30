@@ -214,7 +214,31 @@ def build_parser() -> argparse.ArgumentParser:
     mcp = sub.add_parser("mcp", help="stdio MCP server with the jev_grep tool (rg ranked for a task)")
     mcp.set_defaults(func=command_mcp)
 
+    grep = sub.add_parser("grep", help="jev_grep from the shell: rg, then Jev ranks the files for --task")
+    grep.add_argument("pattern", help="regex, ripgrep syntax")
+    grep.add_argument("path", nargs="?", help="file or folder; default: the current folder")
+    grep.add_argument("--task", required=True, help="one sentence: what you are looking for and why")
+    grep.add_argument("--glob", help="ripgrep glob filter, e.g. '*.py'")
+    grep.add_argument("-i", "--ignore-case", action="store_true")
+    grep.set_defaults(func=command_grep)
+
     return parser
+
+
+def command_grep(args) -> int:
+    """Same code and reply as the jev_grep MCP tool, rooted at the shell's current folder."""
+    from .grep_server import log_event
+    from .grep_tool import ToolInputError, run
+    arguments = {"pattern": args.pattern, "task": args.task, "path": args.path, "glob": args.glob,
+                 "ignore_case": args.ignore_case}
+    try:
+        text, event = run({key: value for key, value in arguments.items() if value is not None}, os.getcwd())
+    except ToolInputError as cause:
+        print(f"jevgrep grep: {cause}", file=sys.stderr)
+        return 2
+    log_event({**event, "via": "cli", "base": os.getcwd()})
+    print(text)
+    return 0
 
 
 def command_mcp(args) -> int:
