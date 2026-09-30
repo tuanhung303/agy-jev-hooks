@@ -1,10 +1,9 @@
 """stdio MCP server with one tool, jev_grep (see grep_tool).
 
 Every call runs at once on its own thread: no queue, no BUSY. A cancelled call sends nothing.
-Relative paths resolve against the base folder: JEV_GREP_ROOT, else CLAUDE_PROJECT_DIR, else the
-folder the harness started the server in. Each call logs one JSON line (no code) to
-~/.local/state/agy-jev-hooks/jev-grep/events.jsonl. Closing stdin ends the process once pending
-calls finish.
+Paths are shown relative to the base folder when the target is within it, otherwise relative to the
+target root. Each call logs one JSON line (no code) to
+~/.local/state/agy-jev-hooks/jev-grep/events.jsonl.
 """
 import json
 import os
@@ -56,14 +55,15 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
         started = time.monotonic()
         try:
             text, event = run(arguments, base, cancel_event=cancel, started=started)
-            result = {"content": [{"type": "text", "text": text}], "isError": False}
+            result = {"content": [{"type": "text", "text": text}], "isError": event.get("outcome") == "rg_error"}
         except grep_tool.ToolInputError as cause:
             text, event = str(cause), {"outcome": "bad_input"}
             result = {"content": [{"type": "text", "text": text}], "isError": True}
         except Exception as cause:  # noqa: BLE001 - the agent gets a short error, never a traceback
             event = {"outcome": "error", "error": type(cause).__name__}
             result = {"content": [{"type": "text", "text": "jev_grep failed; use rg instead."}], "isError": True}
-        log({**event, "base": base, "elapsed_s": round(time.monotonic() - started, 2)})
+        event.setdefault("elapsed_s", round(time.monotonic() - started, 2))
+        log({**event, "base": base})
         key = json.dumps(call_id)
         if not cancel.is_set():
             reply(call_id, result)

@@ -78,7 +78,8 @@ class PrepareOptions:
     should_stop: Optional[Callable[[], bool]] = None
 
 
-def prepare_scope(root: AuthorizedRoot, scope: Tuple[str, ...], options: PrepareOptions) -> PreparedScope:
+def prepare_scope(root: AuthorizedRoot, scope: Tuple[str, ...], options: PrepareOptions,
+                  path_filter=None) -> PreparedScope:
     """Order of fragments: normalized path order, then increasing start line."""
     inventory = inventory_scope(root, scope, options.inventory)
     limits = options.limits
@@ -91,6 +92,8 @@ def prepare_scope(root: AuthorizedRoot, scope: Tuple[str, ...], options: Prepare
     complete = inventory.complete
 
     for entry in inventory.files:
+        if path_filter is not None and entry.relative_path not in path_filter:
+            continue
         if options.should_stop is not None and options.should_stop():
             complete = False
             break

@@ -106,6 +106,23 @@ def test_search_returns_exact_excerpts_and_valid_report(project):
         assert excerpt["code"] == "".join(lines[excerpt["start_line"] - 1:excerpt["end_line"]])
 
 
+def test_path_filter_reads_only_matched_files(project):
+    root = project["source_root"]
+    reads = []
+    real_read = root.read_file_bytes
+
+    def read(path, max_bytes):
+        reads.append(path)
+        return real_read(path, max_bytes)
+
+    root.read_file_bytes = read
+    result = SearchEngine(project, provider=ScriptedProvider()).search(
+        {"query": "where is expiry handled?", "scope": ["src"]},
+        {"path_filter": {"src/handler.py"}})
+    assert result["outcome"]["status"] in ("complete", "partial")
+    assert set(reads) == {os.path.join(project["repository_root"], "src", "handler.py")}
+
+
 def test_second_search_reuses_the_score_cache(project):
     provider = ScriptedProvider()
     engine = SearchEngine(project, provider=provider)

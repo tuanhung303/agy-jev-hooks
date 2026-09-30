@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Optional
 
 from . import __version__
@@ -215,11 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.set_defaults(func=command_mcp)
 
     grep = sub.add_parser("grep", help="jev_grep from the shell: rg, then Jev ranks the files for --task")
-    grep.add_argument("pattern", help="regex, ripgrep syntax")
+    grep.add_argument("pattern", nargs="?", help="regex; with -e, the first positional value is PATH")
     grep.add_argument("path", nargs="?", help="file or folder; default: the current folder")
+    grep.add_argument("-e", "--regexp", dest="regexp", help="pattern, including one starting with a dash")
     grep.add_argument("--task", required=True, help="one sentence: what you are looking for and why")
-    grep.add_argument("--glob", help="ripgrep glob filter, e.g. '*.py'")
+    grep.add_argument("--glob", action="append", help="ripgrep glob filter; may repeat in rg order")
     grep.add_argument("-i", "--ignore-case", action="store_true")
+    grep.add_argument("--no-ignore", action="store_true", help="search ignored files and directories")
     grep.set_defaults(func=command_grep)
 
     return parser
@@ -229,16 +232,28 @@ def command_grep(args) -> int:
     """Same code and reply as the jev_grep MCP tool, rooted at the shell's current folder."""
     from .grep_server import log_event
     from .grep_tool import ToolInputError, run
-    arguments = {"pattern": args.pattern, "task": args.task, "path": args.path, "glob": args.glob,
-                 "ignore_case": args.ignore_case}
+    pattern = args.regexp or args.pattern
+    path = args.pattern if args.regexp and args.pattern else args.path
+    if not pattern:
+        print("jevgrep grep: provide PATTERN or -e PATTERN", file=sys.stderr)
+        return 2
+    if args.regexp and args.path:
+        print("jevgrep grep: use either PATTERN or -e PATTERN", file=sys.stderr)
+        return 2
+    arguments = {"pattern": pattern, "task": args.task, "path": path, "glob": args.glob,
+                 "ignore_case": args.ignore_case, "no_ignore": args.no_ignore}
+    base, started = os.getcwd(), time.monotonic()
     try:
-        text, event = run({key: value for key, value in arguments.items() if value is not None}, os.getcwd())
+        text, event = run({key: value for key, value in arguments.items() if value is not None}, base,
+                          started=started, show_root=False)
     except ToolInputError as cause:
         print(f"jevgrep grep: {cause}", file=sys.stderr)
+        log_event({"outcome": "bad_input", "elapsed_s": round(time.monotonic() - started, 2),
+                   "via": "cli", "base": base})
         return 2
-    log_event({**event, "via": "cli", "base": os.getcwd()})
+    log_event({**event, "via": "cli", "base": base})
     print(text)
-    return 0
+    return 2 if event["outcome"] == "rg_error" else 1 if event["outcome"] == "none" else 0
 
 
 def command_mcp(args) -> int:
@@ -248,8 +263,14 @@ def command_mcp(args) -> int:
 
 
 def main(argv: Optional[list] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for index, value in enumerate(argv[:-1]):
+        if value == "--":
+            break
+        if value in {"-e", "--regexp"} and argv[index + 1].startswith("-"):
+            argv[index:index + 2] = [value + "=" + argv[index + 1]]
+            break
+    args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except ContractValidationError as cause:

@@ -321,6 +321,13 @@ def test_bash_rg_output_is_ranked(repo, provider):
     assert event["ranked"][0] == ["src/rules.py", 0.9]
 
 
+def test_shared_rg_runner_handles_newline_filenames_for_hook(tmp_path):
+    path = tmp_path / "name\nwith newline.py"
+    path.write_text("needle\n", encoding="utf-8")
+    matches, error = hook.grep_matches(["-e", "needle"], [str(path)])
+    assert error is None and matches == {str(path): {1}}
+
+
 def test_non_search_bash_is_not_logged(monkeypatch, capsys):
     logged = []
     monkeypatch.setattr(hook, "_log", logged.append)

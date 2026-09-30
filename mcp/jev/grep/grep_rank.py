@@ -4,7 +4,6 @@ rg finds the matching lines; these helpers turn them into what Jev scores: a que
 layout the prompt bench measured, scope entries within the request contract, and short snippets
 around the matches, the first few per file.
 """
-import json
 import os
 import re
 import subprocess
@@ -14,6 +13,7 @@ from collections import defaultdict
 from dataclasses import replace
 
 MAX_SCOPE_ENTRIES, MAX_SCOPE_BYTES, MAX_QUERY_BYTES = 32, 4096, 8192  # request contract limits
+RG_MAX_BYTES = 8 << 20
 
 
 def build_query(prompts, pattern, purpose=""):
@@ -80,12 +80,11 @@ def snippet_mapper(lines, radius, per_file=SNIPPETS_PER_FILE):
     return trim
 
 
-def rg_matches(filters, paths, cwd=None, timeout_s=15.0, max_bytes=64 << 20):
-    """Run `rg --json` and return (matches, error, complete): matches maps each absolute path to
-    {line number: line text}. error is rg's own message on exit 2 with nothing found (a bad regex,
-    a missing path); complete is False when the timeout or the output cap stopped rg early.
-    --json names the file on every match, even when the search path is a single file."""
-    command = ["rg", "--json", "--color", "never", *filters, "--", *paths]
+def _rg(filters, paths, counts, parser, cwd, timeout_s, max_bytes):
+    options = (["--count", "--with-filename"] if counts else
+               ["--line-number", "--with-filename", "--no-heading", "--color", "never",
+                "--max-columns", "300", "--max-columns-preview"])
+    command = ["rg", *options, "--null", *filters, "--", *paths]
     try:
         process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
@@ -98,35 +97,75 @@ def rg_matches(filters, paths, cwd=None, timeout_s=15.0, max_bytes=64 << 20):
         process.kill()
     timer = threading.Timer(max(0.0, timeout_s), stop)
     timer.start()
-    matches, read = defaultdict(dict), 0
+    output, read = bytearray(), 0
     try:
         for raw in process.stdout:
             read += len(raw)
             if read > max_bytes:
                 stop()
                 break
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                continue
-            if entry.get("type") != "match":
-                continue
-            data = entry.get("data") or {}
-            path = (data.get("path") or {}).get("text")
-            number = data.get("line_number")
-            if path is None or number is None:  # a non-UTF-8 path arrives as bytes: skip it
-                continue
-            text = (data.get("lines") or {}).get("text") or ""
-            matches[os.path.abspath(os.path.join(cwd or "", path))][number] = text.rstrip("\n")
+            output.extend(raw)
         process.stdout.close()
         stderr = process.stderr.read().decode("utf-8", "replace")
         code = process.wait()
     finally:
         timer.cancel()
-    if code == 2 and not matches and not stopped.is_set():
+    complete = not stopped.is_set()
+    records = parser(output, cwd)
+    return records, _rg_error(code, stderr, records, complete), complete
+
+
+def _rg_error(code, stderr, records, complete):
+    if code == 2 and not records and complete:
         lines = [line for line in stderr.strip().splitlines() if line.strip()]
-        return {}, "\n".join(lines[:6]) or "rg failed", True
-    return dict(matches), None, not stopped.is_set()
+        return "\n".join(lines[:6]) or "rg failed"
+
+
+def _count_records(output, cwd):
+    records = {}
+    position = 0
+    while position < len(output):
+        nul = output.find(b"\0", position)
+        end = output.find(b"\n", nul + 1)
+        if nul < 0 or end < 0:
+            break
+        try:
+            name = output[position:nul].decode("utf-8")
+            records[os.path.abspath(os.path.join(cwd or "", name))] = int(output[nul + 1:end].strip())
+        except (UnicodeDecodeError, ValueError):
+            pass
+        position = end + 1
+    return records
+
+
+def _line_records(output, cwd):
+    records = defaultdict(dict)
+    position = 0
+    while position < len(output):
+        nul = output.find(b"\0", position)
+        end = output.find(b"\n", nul + 1)
+        if nul < 0 or end < 0:
+            break
+        try:
+            name = output[position:nul].decode("utf-8")
+            path = os.path.abspath(os.path.join(cwd or "", name))
+            number, separator, text = output[nul + 1:end].partition(b":")
+            if separator:
+                records[path][int(number)] = text.rstrip(b"\r").decode("utf-8", "replace")
+        except (UnicodeDecodeError, ValueError):
+            pass
+        position = end + 1
+    return dict(records)
+
+
+def rg_matches(filters, paths, cwd=None, timeout_s=15.0, max_bytes=RG_MAX_BYTES):
+    """Return absolute paths to matched line numbers and text, an error, and completeness."""
+    return _rg(filters, paths, False, _line_records, cwd, timeout_s, max_bytes)
+
+
+def rg_file_counts(filters, paths, cwd=None, timeout_s=15.0, max_bytes=RG_MAX_BYTES):
+    """Return {path: line_count}, rg error, and whether the complete count output arrived."""
+    return _rg(filters, paths, True, _count_records, cwd, timeout_s, max_bytes)
 
 
 def elapsed(started):

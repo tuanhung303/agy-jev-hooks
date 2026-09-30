@@ -100,7 +100,8 @@ class SearchEngine:
             logger=self._logger or SearchLogger("silent"),
         )
         try:
-            return self._run(request, context, invocation.get("fragment_map"))
+            return self._run(request, context, invocation.get("fragment_map"),
+                             invocation.get("path_filter"))
         except (RequestValidationError, ConfigurationError, ResponseBudgetError,
                 UnauthorizedPathError, ProviderError) as cause:
             code = _error_code_of(cause)
@@ -109,7 +110,7 @@ class SearchEngine:
         except ContractValidationError:
             raise  # a contract failure later in the pipeline is a defect, stay loud
 
-    def _run(self, raw_request, context: SearchContext, fragment_map=None) -> dict:
+    def _run(self, raw_request, context: SearchContext, fragment_map=None, path_filter=None) -> dict:
         config = self._configuration["config"]
         try:
             request = parse_search_request(raw_request, ResponseLimits(
@@ -138,7 +139,7 @@ class SearchEngine:
             ),
             limits=_preparation_limits(config),
             should_stop=lambda: not context.can_start_work(),
-        ))
+        ), path_filter=path_filter)
 
         # A lost authorization cannot become permission to send an earlier partial snapshot.
         root.assert_current()

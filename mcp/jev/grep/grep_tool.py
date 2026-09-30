@@ -1,46 +1,34 @@
-"""jev_grep: rg finds every match, Jev ranks the matched files against the agent's task.
-
-The reply lists every matching file (root once, then relative paths) with its match lines, and
-code only for the best few. Nothing is hidden: a file Jev scores low is still listed. One budget
-covers the whole call; when it runs out, files already scored keep their rank and the rest follow
-unranked. Jev failing never fails the call. No profile: one defaults file (`defaults.yaml` in the
-jevgrep config directory) serves any folder, rooted at the searched path's git repository.
-"""
+"""Search with rg, then rank bounded match sets with Jev. Only listed paths and ranked snippets appear."""
 import os
 import subprocess
 import time
+from collections import Counter
+from itertools import islice
 
-from .grep_rank import build_query, cover, elapsed, rg_matches, snippet_mapper
+from .grep_rank import RG_MAX_BYTES, build_query, cover, elapsed, rg_file_counts, rg_matches, snippet_mapper
 
-CODE_FILES = 3  # files that get code in the reply
-CODE_LINES = 30  # lines per code block
-SMALL_LINES = 40  # at most CODE_FILES files and this many match lines: plain rg output, no Jev
-MAX_FILES = 60  # beyond: too broad to rank, list and ask to narrow
-MAX_BYTES = 600_000  # bytes Jev may be sent for one call
-BUDGET_S = 3.0  # the whole call, rg included
-MIN_JEV_S = 0.5  # less left than this after rg: do not start Jev
-SNIPPET_LINES, CONCURRENCY = 12, 32  # as the grep hint hook, measured by the bench
-LIST_LINES = 6  # match line numbers shown per listed file
-TEXT_CHARS = 240  # longest source line shown
+CODE_FILES, CODE_LINES = 3, 30
+SMALL_LINES, MAX_FILES = 40, 60
+MAX_BYTES, BUDGET_S, MIN_JEV_S = 600_000, 3.0, 0.5
+SNIPPET_LINES, CONCURRENCY = 12, 32
+LIST_LINES, TEXT_CHARS = 6, 240
 
 TOOL_NAME = "jev_grep"
 TOOL_DESCRIPTION = (
-    "Regex search like rg, ranked for your task. Finds every file matching `pattern` (ripgrep regex) under "
-    "`path`, then a relevance model ranks them against `task` and returns code for the best few files plus every "
-    "other matching file with its match lines. Nothing is hidden. Use it for broad or exploratory searches where "
-    "many files may match; plain rg is fine for a known symbol or a quick check. The reply starts with the root "
-    "it searched; relative paths resolve against the session's start directory, so pass an absolute path after "
-    "`cd` or inside a worktree. Takes about 1-3 s."
+    "Regex search like rg, ranked for your task. Finds matching files under `path`, then returns code for the "
+    "best few and lists the other matches. Searches over 60 files are summarized by folder; narrow with a path "
+    "or glob. Use it for broad or exploratory searches; plain rg is fine for a known symbol or quick check."
 )
 TOOL_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
         "pattern": {"type": "string", "description": "Regex, ripgrep syntax."},
         "task": {"type": "string", "description": "One sentence: what you are looking for and why."},
-        "path": {"type": "string", "description": "File or folder to search, absolute or relative to the root. "
-                                                  "Default: the root."},
-        "glob": {"type": "string", "description": "ripgrep glob filter, e.g. `*.py` or `!**/test/**`."},
+        "path": {"type": "string", "description": "File or folder to search, absolute or relative to the base."},
+        "glob": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                 "description": "ripgrep glob filters; multiple values follow ripgrep's ordered --glob behavior."},
         "ignore_case": {"type": "boolean", "description": "Case-insensitive match."},
+        "no_ignore": {"type": "boolean", "description": "Search ignored files and directories."},
     },
     "required": ["pattern", "task"],
     "additionalProperties": False,
@@ -52,19 +40,19 @@ class ToolInputError(ValueError):
 
 
 def repository_root_of(path, base):
-    """The git top level holding `path`; outside git, the base folder when it holds `path`, else the
-    path's own folder."""
     folder = path if os.path.isdir(path) else os.path.dirname(path)
-    if folder == base or folder.startswith(base.rstrip(os.sep) + os.sep):
-        fallback = base
-    else:
-        fallback = folder
     try:
         top = subprocess.run(["git", "-C", folder, "rev-parse", "--show-toplevel"], capture_output=True,
                              text=True, timeout=2, stdin=subprocess.DEVNULL).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         top = ""
-    return os.path.realpath(top) if top else fallback
+    if top:
+        return os.path.realpath(top)
+    return base if _inside(path, base) else folder
+
+
+def _inside(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
 def parse_arguments(arguments, base):
@@ -75,156 +63,233 @@ def parse_arguments(arguments, base):
         raise ToolInputError("pattern is required")
     if not isinstance(task, str) or not task.strip():
         raise ToolInputError("task is required: one sentence on what you are looking for")
-    raw = arguments.get("path") or "."
-    glob = arguments.get("glob")
-    if not isinstance(raw, str) or (glob is not None and not isinstance(glob, str)):
-        raise ToolInputError("path and glob must be strings")
+    raw, globs = arguments.get("path") or ".", arguments.get("glob")
+    if isinstance(globs, str):
+        globs = [globs]
+    if globs is None:
+        globs = []
+    if not isinstance(raw, str) or not isinstance(globs, list) or any(not isinstance(g, str) for g in globs):
+        raise ToolInputError("path must be a string and glob must be a string or list of strings")
     target = os.path.realpath(os.path.join(base, os.path.expanduser(raw)))
     if not os.path.exists(target):
         raise ToolInputError(f"path not found: {target}")
-    filters = ["--ignore-case"] if arguments.get("ignore_case") is True else []
-    if glob:
-        filters += ["--glob", glob]
-    return {"pattern": pattern, "task": task.strip(), "target": target, "filters": filters + ["-e", pattern]}
+    filters = []
+    if arguments.get("ignore_case") is True:
+        filters.append("--ignore-case")
+    if arguments.get("no_ignore") is True:
+        filters.append("--no-ignore")
+    for glob in globs:
+        filters.extend(("--glob", glob))
+    filters.extend(("-e", pattern))
+    return {"pattern": pattern, "task": task.strip(), "target": target, "filters": filters,
+            "no_ignore": arguments.get("no_ignore") is True}
 
 
-def run(arguments, base, cancel_event=None, env=None, started=None):
-    """(reply text, log event) for one call. Never raises for a Jev or config failure."""
+def run(arguments, base, cancel_event=None, env=None, started=None, show_root=True):
     started = time.monotonic() if started is None else started
-    request = parse_arguments(arguments, base)
-    target = request["target"]
-    root = repository_root_of(target, os.path.realpath(base))
-    event = {"root": root, "pattern": request["pattern"][:200]}
-    found, error, complete = rg_matches(request["filters"], [target], cwd=root,
-                                        timeout_s=max(0.2, BUDGET_S - MIN_JEV_S - elapsed(started)))
-    event.update({"rg_s": elapsed(started), "matched_files": len(found), "rg_complete": complete})
-    head = f"root: {root}"
+    request = parse_arguments(arguments, os.path.realpath(base))
+    target, base = request["target"], os.path.realpath(base)
+    git_root = repository_root_of(target, base)
+    display_root = base if _inside(target, base) else git_root
+    head = f"root: {display_root}" if show_root or display_root != base else ""
+    event = {"root": git_root, "pattern": request["pattern"][:200]}
+    rel_target = os.path.relpath(target, git_root).replace(os.sep, "/")
+    phase_a_budget = max(0.0, BUDGET_S - MIN_JEV_S - elapsed(started))
+    counts, error, complete = rg_file_counts(request["filters"], [rel_target], cwd=git_root,
+                                              timeout_s=phase_a_budget, max_bytes=RG_MAX_BYTES)
+    event.update({"rg_s": elapsed(started), "matched_files": len(counts), "rg_complete": complete})
     if error:
-        return f"{head}\nrg error: {error}", {**event, "outcome": "rg_error"}
-    matches = {}
-    for absolute, lines in found.items():
-        relative = os.path.relpath(os.path.realpath(absolute), root).replace(os.sep, "/")
-        matches[relative] = lines
-    incomplete = "" if complete else " rg stopped at the time limit: the list may be incomplete."
-    where = os.path.relpath(target, root)
-    scope = "" if where == "." else f" under {where}"
-    if not matches:
-        return f"{head}\nNo matches for {request['pattern']!r}{scope}.{incomplete}", {**event, "outcome": "none"}
-    by_count = sorted(matches, key=lambda p: (-len(matches[p]), p))
-    total_lines = sum(len(lines) for lines in matches.values())
-    summary = f"{len(matches)} file{'s' if len(matches) > 1 else ''} match{'es' if len(matches) == 1 else ''} {request['pattern']!r}{scope}.{incomplete}"
-    if len(matches) <= CODE_FILES and total_lines <= SMALL_LINES:
-        body = "\n".join(f"{path}:{number}:{_clip(text)}" for path in sorted(matches)
-                         for number, text in sorted(matches[path].items()))
-        return f"{head}\n{summary}\n\n{body}", {**event, "outcome": "small"}
-    if len(matches) > MAX_FILES:
-        listed = "\n".join(f"{path}: {len(matches[path])} lines" for path in by_count[:20])
-        more = len(matches) - 20
-        return (f"{head}\n{summary} Too broad to rank: narrow the pattern, path or glob. "
-                f"Files with the most matches:\n{listed}\n... {more} more"), {**event, "outcome": "too_broad"}
+        return _finish(_join(head, f"rg error: {error}"), event, started, "rg_error")
+    if not complete or len(counts) > MAX_FILES:
+        text = _too_broad(head, target, display_root, counts, complete)
+        return _finish(text, event, started, "too_broad")
+    if not counts:
+        scope = _scope(target, display_root)
+        text = f"No matches for {request['pattern']!r}" + (f" {scope}" if scope else "") + "."
+        return _finish(_join(head, text), event, started, "none")
 
-    scores, reason = _score(request, root, matches, started, cancel_event, env, event)
-    threshold = event.get("threshold", 0.5)
-    return _render(head, summary, root, matches, by_count, scores, reason, threshold), \
-        {**event, "outcome": "ranked" if scores and not reason else "partly_ranked" if scores else "unranked",
-         "reason": reason, "scored_files": len(scores), "elapsed_s": elapsed(started)}
+    paths = sorted(os.path.relpath(path, git_root).replace(os.sep, "/") for path in counts)
+    found, error, complete = rg_matches(request["filters"], paths, cwd=git_root,
+                                         timeout_s=max(0.0, BUDGET_S - MIN_JEV_S - elapsed(started)),
+                                         max_bytes=RG_MAX_BYTES)
+    event.update({"rg_s": elapsed(started), "rg_complete": complete})
+    if error:
+        return _finish(_join(head, f"rg error: {error}"), event, started, "rg_error")
+    if not complete:
+        return _finish(_too_broad(head, target, display_root, counts, True,
+                                   "Match details exceeded the output or time limit."),
+                       event, started, "too_broad")
+    matches = {os.path.relpath(os.path.realpath(path), git_root).replace(os.sep, "/"): lines
+               for path, lines in found.items()}
+    event["matched_files"] = len(matches)
+    if not matches:
+        return _finish(_join(head, f"No matches for {request['pattern']!r}."), event, started, "none")
+    scope = _scope(target, display_root)
+    summary = f"{len(matches)} {'file' if len(matches) == 1 else 'files'} match " \
+              f"{request['pattern']!r}" + (f" {scope}" if scope else "")
+    by_count = sorted(matches, key=lambda path: (-len(matches[path]), path))
+    total_lines = sum(len(lines) for lines in matches.values())
+    if len(matches) <= CODE_FILES and total_lines <= SMALL_LINES:
+        body = "\n".join(_match_line(_display_path(path, git_root, display_root), number, text)
+                          for path in sorted(matches) for number, text in sorted(matches[path].items()))
+        return _finish(_join(head, body), event, started, "small")
+
+    scores, reason = _score(request, git_root, matches, started, cancel_event, env, event)
+    event.update({"scored_files": len(scores)})
+    rendered = _render(git_root, display_root, head, summary, matches, by_count, scores, reason,
+                       event.get("threshold", 0.5))
+    outcome = "ranked" if scores and not reason else "partly_ranked" if scores else "unranked"
+    return _finish(rendered, event, started, outcome, reason=reason)
+
+
+def _finish(text, event, started, outcome, **extra):
+    event.update(extra, outcome=outcome, elapsed_s=elapsed(started))
+    return text, event
+
+
+def _scope(target, root):
+    relative = os.path.relpath(target, root).replace(os.sep, "/")
+    return ("in " if os.path.isfile(target) else "under ") + relative if relative != "." else ""
+
+
+def _display_path(path, git_root, display_root):
+    return os.path.relpath(os.path.join(git_root, path), display_root).replace(os.sep, "/")
+
+
+def _too_broad(head, target, display_root, counts, complete, note=""):
+    target_dir = target if os.path.isdir(target) else os.path.dirname(target)
+    folders = Counter(
+        relative.split("/", 1)[0] if "/" in relative else "(top level)"
+        for path in counts for relative in [os.path.relpath(path, target_dir).replace(os.sep, "/")])
+    where = _scope(target, display_root)
+    ordered = sorted(folders.items(), key=lambda item: (-item[1], item[0]))
+    rows = [f"{folder + '/' if folder != '(top level)' else folder}: {count}" for folder, count in ordered[:8]]
+    if len(ordered) > 8:
+        rows.append(f"+{len(ordered) - 8} more folders")
+    text = (f"{'at least ' if not complete else ''}{len(counts)} matching files" +
+            (f" {where}" if where else "") + "; too broad to rank. Narrow with a path or glob.")
+    return _join(head, text + (" The scan may be incomplete." if not complete else "") +
+                 (f" {note}" if note else "") + ("\n" + "\n".join(rows) if rows else ""))
 
 
 def _score(request, root, matches, started, cancel_event, env, event):
-    """({path: (score, start, end)} for the files Jev scored, reason for any file left unscored)."""
     from . import engine as engine_module
     from .config import ConfigurationError, load_defaults_for
     from .prepare import find_credential_pattern
 
     query = build_query([request["task"]], request["pattern"])
     if find_credential_pattern(query):
-        return {}, "the task or pattern looks like a credential, so nothing was sent to Jev"
+        return {}, "not scorable (credential-like task or pattern)"
     remaining = BUDGET_S - elapsed(started)
-    if remaining < MIN_JEV_S:
-        return {}, "no time left after rg"
+    if remaining <= 0:
+        return {}, "time limit"
     try:
         loaded = load_defaults_for(root, env=env)
     except ConfigurationError as cause:
-        return {}, f"no Jev configuration ({cause.code})"
+        return {}, f"ranking service unavailable ({cause.code})"
     config = loaded["config"]
     config["search"]["deadline_ms"] = int(remaining * 1000)
     config["search"]["concurrency"] = CONCURRENCY
-    config["scan_caps"]["transmitted_bytes"] = MAX_BYTES  # refuses before dispatch, never truncates
+    config["scan_caps"]["transmitted_bytes"] = MAX_BYTES
+    if request["no_ignore"]:
+        config["source"]["respect_gitignore"] = False
     lines = {path: set(found) for path, found in matches.items()}
     result = engine_module.SearchEngine(loaded, env=dict(env if env is not None else os.environ)).search(
         {"query": query, "scope": cover(lines), "max_context_tokens": config["search"]["max_response_tokens"],
          "allow_partial_scan": True},
-        {"fragment_map": snippet_mapper(lines, SNIPPET_LINES), "cancel_event": cancel_event})
-    outcome = result["outcome"]
-    report = outcome.get("report") or {}
+        {"fragment_map": snippet_mapper(lines, SNIPPET_LINES), "cancel_event": cancel_event,
+         "path_filter": set(lines)})
+    outcome, report = result["outcome"], (result["outcome"].get("report") or {})
     event.update({"status": outcome.get("status"), "error": (outcome.get("error") or {}).get("code"),
                   "stop_reasons": report.get("stop_reasons"),
                   "sent_bytes": (report.get("usage") or {}).get("transmitted_bytes"),
-                  "jev_s": round(elapsed(started) - event["rg_s"], 2)})
-    event["threshold"] = config["search"]["threshold"]
+                  "jev_s": round(elapsed(started) - event["rg_s"], 2),
+                  "threshold": config["search"]["threshold"]})
     scores = {}
     for path, start, end, score in result.get("fragment_scores") or ():
         if path in matches and score > scores.get(path, (-1.0,))[0]:
             scores[path] = (score, start, end)
-    unscored = len(matches) - len(scores)
-    if not unscored:
+    if len(scores) == len(matches):
         return scores, None
+    stop_reasons = set(report.get("stop_reasons") or ())
+    reasons = dict.fromkeys(("PROVIDER_AUTH", "PROVIDER_QUOTA", "PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE",
+                             "INVALID_PROVIDER_RESPONSE"), "ranking service error")
+    reasons.update({"CANCELLED": "cancelled", "DEADLINE": "time limit",
+                    "SCAN_CAP_REACHED": "size limit", "SCOPE_EXCEEDS_SCAN_BUDGET": "size limit"})
     if outcome.get("status") == "error":
-        return scores, f"Jev failed ({event['error']})"
-    stops = [str(reason).lower().replace("_", " ") for reason in report.get("stop_reasons") or ()]
-    return scores, f"{unscored} files not scored" + (f": {', '.join(stops)}" if stops else "")
+        code = event["error"] or next((code for code in stop_reasons if reasons.get(code) == "ranking service error"),
+                                      "unknown")
+        return scores, f"ranking service error ({code})"
+    why = next((reasons[code] for code in stop_reasons if code in reasons), None)
+    if why == "ranking service error":
+        return scores, f"ranking service error ({', '.join(sorted(stop_reasons))})"
+    if cancel_event is not None and cancel_event.is_set():
+        why = "cancelled"
+    elif why is None:
+        why = "time limit" if elapsed(started) >= BUDGET_S else "not scorable (too large, binary, or excluded)"
+    return scores, why
 
 
-def _render(head, summary, root, matches, by_count, scores, reason, threshold):
-    """Code for the best files Jev scored relevant (unranked: the files with the most matches), then
-    every other matching file, best first. A file scored below the threshold gets no code but stays listed."""
-    ranked = sorted(scores, key=lambda p: -scores[p][0])
+def _render(root, display_root, head, summary, matches, by_count, scores, reason, threshold):
+    ranked = sorted(scores, key=lambda path: -scores[path][0])
     rest = [path for path in by_count if path not in scores]
     if not scores:
-        title = f"Unranked ({reason}); order is match count."
-        code_paths = rest[:CODE_FILES]
+        title, code_paths = f"Unranked ({reason or 'no ranking'}); by match count.", rest[:CODE_FILES]
     else:
-        title = "Ranked for your task, best first" + (f"; {reason}, listed last by match count." if reason else ".")
+        title = "Ranked."
+        if len(scores) < len(matches):
+            title += f" Scored {len(scores)} of {len(matches)}; {reason or 'some files were not scorable'}."
         code_paths = [path for path in ranked if scores[path][0] >= threshold][:CODE_FILES]
-        if not code_paths:
-            title += " None looked clearly relevant, so no code is shown."
-    blocks = [_code_block(root, path, matches[path], scores.get(path)) for path in code_paths]
+    blocks = [_code_block(root, display_root, path, matches[path], scores.get(path)) for path in code_paths]
+    parts = [head, f"{summary}. {title}", *blocks]
+    if scores and not code_paths:
+        parts.append("Best keyword matches, not judged relevant:\n" +
+                     _keyword_matches(root, display_root, ranked[:2], matches))
     others = [path for path in ranked + rest if path not in code_paths]
-    listed = "\n".join(f"{path}: {_line_list(matches[path])}" for path in others)
-    parts = [head, f"{summary} {title}", *blocks]
     if others:
-        parts.append("Other matching files (file: match lines):\n" + listed)
-    return "\n\n".join(part for part in parts if part)
+        listed = "\n".join(f"{_display_path(path, root, display_root)}: {_line_list(matches[path])}"
+                            for path in others)
+        parts.append("Other matches:\n" + listed)
+    return _join(*parts)
 
 
-def _code_block(root, path, lines, scored):
+def _keyword_matches(root, display_root, paths, matches):
+    return "\n".join(_match_line(_display_path(path, root, display_root), number, text)
+                     for path in paths for number, text in sorted(matches[path].items())[:5])
+
+
+def _code_block(root, display_root, path, lines, scored):
     numbers = sorted(lines)
-    if scored:
-        start, end = scored[1], scored[2]
-        inside = [n for n in numbers if start <= n <= end] or numbers
-    else:
-        start, end, inside = numbers[0], numbers[-1], numbers
+    start, end = (scored[1], scored[2]) if scored else (numbers[0], numbers[-1])
+    inside = [number for number in numbers if start <= number <= end] or numbers
     first = max(start, inside[0] - 8)
     last = min(end, first + CODE_LINES - 1)
-    if last < inside[0]:  # the span starts far above its first match: centre on the match instead
+    if last < inside[0]:
         first, last = max(1, inside[0] - 8), inside[0] + CODE_LINES - 9
     try:
-        with open(os.path.join(root, path), "r", encoding="utf-8", errors="replace") as handle:
-            source = handle.read().splitlines()
+        with open(os.path.join(root, path), "r", encoding="utf-8", errors="replace", newline="\n") as handle:
+            source = list(islice(handle, first - 1, last))
     except OSError:
-        return f"{path}: {_line_list(lines)} (unreadable now)"
-    last = min(last, len(source))
+        return f"{_display_path(path, root, display_root)}: {_line_list(lines)} (unreadable now)"
+    last = first - 1 + len(source)
     width = len(str(last))
-    code = "\n".join(f"{n:>{width}}  {_clip(source[n - 1])}" for n in range(first, last + 1))
-    return f"{path}:{first}-{last} (matches: {_line_list(lines)})\n```\n{code}\n```"
+    code = "\n".join(f"{number:>{width}}  {_clip(line)}" for number, line in enumerate(source, first))
+    return f"{_display_path(path, root, display_root)}:{first}-{last} (matches: {_line_list(lines)})\n```\n{code}\n```"
 
 
 def _line_list(lines):
     numbers = sorted(lines)
-    shown = ", ".join(map(str, numbers[:LIST_LINES]))
-    return shown + (f" +{len(numbers) - LIST_LINES} more" if len(numbers) > LIST_LINES else "")
+    return ", ".join(map(str, numbers[:LIST_LINES])) + (
+        f" +{len(numbers) - LIST_LINES} more" if len(numbers) > LIST_LINES else "")
 
 
 def _clip(text):
-    text = text.rstrip("\n")
-    return text if len(text) <= TEXT_CHARS else text[:TEXT_CHARS] + "..."
+    return text.rstrip("\r\n")[:TEXT_CHARS] + ("..." if len(text.rstrip("\r\n")) > TEXT_CHARS else "")
+
+
+def _match_line(path, number, text):
+    return f"{path}:{number}:{_clip(text)}"
+
+
+def _join(*parts):
+    return "\n\n".join(part for part in parts if part)
