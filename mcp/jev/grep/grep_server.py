@@ -49,7 +49,8 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
             output.flush()
 
     def reply(call_id, result=None, error=None):
-        send({"jsonrpc": "2.0", "id": call_id, **({"error": error} if error else {"result": result})})
+        if call_id is not None:
+            send({"jsonrpc": "2.0", "id": call_id, **({"error": error} if error else {"result": result})})
 
     def execute(call_id, arguments, cancel):
         started = time.monotonic()
@@ -71,7 +72,11 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
 
     def handle(message):
         call_id, method = message.get("id"), message.get("method")
-        params = message.get("params") or {}
+        params = message.get("params")
+        if "params" in message and not isinstance(params, dict):
+            reply(call_id, error={"code": -32602, "message": "invalid params"})
+            return
+        params = params or {}
         if method == "initialize":
             requested = params.get("protocolVersion")
             reply(call_id, {
@@ -88,14 +93,14 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
                 "inputSchema": grep_tool.TOOL_INPUT_SCHEMA,
                 "annotations": {"readOnlyHint": True, "openWorldHint": True, "title": "rg ranked by Jev"},
             }]})
-        elif method == "tools/call":
+        elif method == "tools/call" and call_id is not None:
             if params.get("name") != grep_tool.TOOL_NAME:
                 reply(call_id, error={"code": -32602, "message": "unknown tool"})
                 return
             cancel = threading.Event()
             calls[json.dumps(call_id)] = cancel
-            thread = threading.Thread(target=execute, args=(call_id, params.get("arguments") or {}, cancel),
-                                      daemon=True)
+            raw = params.get("arguments")
+            thread = threading.Thread(target=execute, args=(call_id, {} if raw is None else raw, cancel), daemon=True)
             threads.append(thread)
             thread.start()
         elif method == "notifications/cancelled":
@@ -120,10 +125,5 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
         thread.join(timeout=30)
 
 
-def main():
-    serve()
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    serve()

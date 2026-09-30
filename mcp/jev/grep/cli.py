@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import time
-from typing import Optional
 
 from .config import (ConfigurationError, config_directory, default_configuration, doctor_report,
                      dump_configuration_yaml, find_profile_for, load_configuration,
@@ -256,7 +255,7 @@ def command_mcp(args) -> int:
     return 0
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: list | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     for index, value in enumerate(argv[:-1]):
         if value == "--":

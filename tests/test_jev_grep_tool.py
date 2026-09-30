@@ -81,7 +81,7 @@ def test_ranked_reply_gives_code_for_the_relevant_file_and_lists_the_rest(repo, 
     assert event["outcome"] == "ranked" and event["matched_files"] == 7
     lines = text.splitlines()
     assert lines[0] == f"root: {repo}"
-    assert "7 files match Enterprise. Ranked." in text
+    assert "7 files match. Ranked." in text
     assert "src/rules.py:1-2 (matches: 2)\n```\n1  def excluded(campaign):" in text
     listed = text.split("Other matches:\n")[1].splitlines()
     assert sorted(listed) == [f"docs/note{i}.md: 2" for i in range(6)]  # low scores: listed, no code
@@ -107,7 +107,73 @@ def test_bad_regex_returns_rg_error_not_no_matches(repo, provider):
 
 def test_no_match_says_so(repo, provider):
     text, event = call(repo, pattern="Nowhere", path="docs")
-    assert event["outcome"] == "none" and "No matches for Nowhere under docs." in text
+    assert event["outcome"] == "none" and "No matches." in text
+
+
+def test_disappeared_text_file_is_unreadable_not_binary(repo, provider, monkeypatch):
+    path = repo / "src" / "vanished.py"
+    path.write_text("Enterprise vanished\n", encoding="utf-8")
+    real = grep_tool.rg_matches
+
+    def scan(*args, **kwargs):
+        result = real(*args, **kwargs)
+        path.unlink()
+        return result
+
+    monkeypatch.setattr(grep_tool, "rg_matches", scan)
+    text, event = call(repo, pattern="Enterprise", path="src/vanished.py")
+    assert event["outcome"] == "unreadable"
+    assert "vanished.py (unreadable now)" in text and "(binary)" not in text
+
+
+def test_file_disappearing_between_scans_is_unreadable(repo, provider, monkeypatch):
+    path = repo / "src" / "vanished.py"
+    path.write_text("Enterprise vanished\n", encoding="utf-8")
+    real = grep_tool.rg_file_counts
+
+    def scan(*args, **kwargs):
+        counts, error, complete = real(*args, **kwargs)
+        path.unlink()
+        return counts, error, complete
+
+    monkeypatch.setattr(grep_tool, "rg_file_counts", scan)
+    text, event = call(repo, pattern="Enterprise", path="src/vanished.py")
+    assert event["outcome"] == "unreadable"
+    assert "vanished.py (unreadable now)" in text and "rg error:" not in text
+
+
+@pytest.mark.parametrize("score_value", [0.1, 0.9])
+def test_file_disappearing_during_ranking_is_unreadable(repo, provider, monkeypatch, score_value):
+    path = repo / "docs" / "note0.md"
+
+    def score(request, root, matches, *args):
+        path.unlink()
+        return ({name: (score_value if name == "docs/note0.md" else (0.9 if name == "src/rules.py" else 0.1),
+                        1, 2) for name in matches}, None)
+
+    monkeypatch.setattr(grep_tool, "_score", score)
+    text, event = call(repo, pattern="Enterprise")
+    assert event["outcome"] == "ranked"
+    assert "note0.md (unreadable now)" in text
+    assert "note0.md: 2" not in text
+
+
+def test_file_disappearing_during_render_is_not_listed_as_match(repo, monkeypatch):
+    path = repo / "docs" / "note0.md"
+    real_status, calls = grep_tool._file_status, 0
+
+    def status(name, check_binary=True):
+        nonlocal calls
+        if name == str(path) and (calls := calls + 1) == 2:
+            path.unlink()
+        return real_status(name, check_binary)
+
+    monkeypatch.setattr(grep_tool, "_file_status", status)
+    matches = {"src/rules.py": {1: "needle"}, "docs/note0.md": {2: "needle"}}
+    text = grep_tool._render(str(repo), str(repo), "", "2 files match.", matches, list(matches),
+                             {"src/rules.py": (0.9, 1, 1)}, None, 0.5)
+    assert "note0.md (unreadable now)" in text
+    assert "note0.md:" not in text.split("Other matches:\n")[-1]
 
 
 def test_too_broad_lists_and_asks_to_narrow(repo, provider, monkeypatch):
@@ -120,7 +186,7 @@ def test_too_broad_lists_and_asks_to_narrow(repo, provider, monkeypatch):
 def test_jev_failure_falls_back_to_match_count_order(repo, provider):
     provider.fail = True
     text, event = call(repo, pattern="Enterprise")
-    assert event["outcome"] == "unranked" and "Unranked (" in text and "; by match count." in text
+    assert event["outcome"] == "unranked" and "7 files match. Unranked (" in text and "; by match count." in text
     assert "ranking service error (PROVIDER_UNAVAILABLE)" in text, repr(event)
     assert text.count("```\n") == 6  # three code blocks: the files with the most matches
     assert all(f"docs/note{i}.md" in text for i in range(6)) and "src/rules.py" in text
@@ -333,6 +399,7 @@ def test_too_broad_shows_folder_counts_and_no_file_list(repo, provider, monkeypa
     text, event = call(repo, pattern="Enterprise")
     assert event["outcome"] == "too_broad" and "8 matching files" in text
     assert "docs/: 6" in text and "(top level): 1" in text and "root.py" not in text and not provider.sent_paths
+    assert str(repo) not in text.split("\n", 1)[1]
 
 
 def test_too_broad_partial_read_qualifies_count_and_keeps_warning(repo, provider, monkeypatch):
@@ -377,7 +444,7 @@ def test_low_score_preview_reports_omitted_matching_lines(repo, provider):
     matches = {"docs/note0.md": {n: f"needle {n}" for n in range(1, 21)},
                "docs/note1.md": {n: f"needle {n}" for n in range(1, 11)}}
     scores = {path: (0.1, 1, 2) for path in matches}
-    text = grep_tool._render(str(repo), str(repo), "", "2 files match needle", matches, list(matches),
+    text = grep_tool._render(str(repo), str(repo), "", "2 files match.", matches, list(matches),
                              scores, None, 0.5)
     assert "docs/note0.md:1:needle 1" in text
     assert "+15 more" in text
@@ -396,13 +463,13 @@ def test_code_block_shows_twenty_lines_and_other_match_lines(repo):
     many = {n: f"line {n}" for n in range(1, 28)}
     block = grep_tool._code_block(str(repo), str(repo), "wide.py", many, (0.9, 1, 20))
     assert "wide.py:1-20 (27 matches)" in block
+    assert "25: line 25\n+2 more" in block and "27: line 27" not in block
     assert "(matches: 1, 2" not in block and "+2 more" in block
 
 
-def test_pattern_is_rendered_as_supplied(repo, provider):
+def test_no_match_summary_omits_the_search_pattern(repo, provider):
     text, _ = call(repo, pattern=r"ref\(")
-    assert r"No matches for ref\(" in text
-    assert "'ref\\\\('" not in text
+    assert text == f"root: {repo}\n\nNo matches."
 
 
 def test_grep_last_fragment_is_opt_in_and_preserves_hook_cap():

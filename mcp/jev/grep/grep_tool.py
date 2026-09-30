@@ -90,8 +90,7 @@ def run(arguments, base, cancel_event=None, env=None, started=None, show_root=Tr
     request = parse_arguments(arguments, os.path.realpath(base))
     target, base = request["target"], os.path.realpath(base)
     git_root = repository_root_of(target, base)
-    display_root = base if _inside(target, base) else git_root
-    scope = _scope(target, display_root)
+    display_root = base if _inside(target, base) else (target if os.path.isdir(target) else os.path.dirname(target))
     head = f"root: {display_root}" if show_root or display_root != base else ""
     event = {"root": git_root, "pattern": request["pattern"][:200]}
     rel_target = os.path.relpath(target, git_root).replace(os.sep, "/")
@@ -102,20 +101,20 @@ def run(arguments, base, cancel_event=None, env=None, started=None, show_root=Tr
     if error and not counts:
         return _finish(_join(head, f"rg error: {error}"), event, started, "rg_error")
     warning = error if counts else None
-    if warning:
-        event["rg_warning"] = warning
+    event.update({"rg_warning": warning} if warning else {})
     if not complete or len(counts) > MAX_FILES:
         text = _too_broad(head, target, display_root, counts, complete, warning=warning)
         return _finish(text, event, started, "too_broad")
     if not counts:
-        text = f"No matches for {request['pattern']}" + (f" {scope}" if scope else "") + "."
-        return _finish(_join(head, text), event, started, "none")
+        return _finish(_join(head, "No matches.", warning=warning), event, started, "none")
 
     paths = sorted(os.path.relpath(path, git_root).replace(os.sep, "/") for path in counts)
     found, error, complete = rg_matches(request["filters"], paths, cwd=git_root,
                                          timeout_s=max(0.0, BUDGET_S - MIN_JEV_S - elapsed(started)),
                                          max_bytes=RG_MAX_BYTES)
     event.update({"rg_s": elapsed(started), "rg_complete": complete})
+    missing = {os.path.join(git_root, path) for path in paths} - found.keys()
+    found.update({path: {} for path in missing if _file_status(path) == "unreadable"})
     if error and not found:
         return _finish(_join(head, f"rg error: {error}"), event, started, "rg_error")
     if error:
@@ -128,27 +127,30 @@ def run(arguments, base, cancel_event=None, env=None, started=None, show_root=Tr
                for path, lines in found.items()}
     event["matched_files"] = len(matches)
     if not matches:
-        return _finish(_join(head, f"No matches for {request['pattern']}."), event, started, "none")
-    binary_paths = {path for path in matches if _has_nul(os.path.join(git_root, path))}
-    text_matches = {path: lines for path, lines in matches.items() if path not in binary_paths}
-    summary = f"{len(matches)} {'file' if len(matches) == 1 else 'files'} match {request['pattern']}" + \
-              (f" {scope}" if scope else "")
+        return _finish(_join(head, "No matches.", warning=warning), event, started, "none")
+    statuses = {path: _file_status(os.path.join(git_root, path)) for path in matches}
+    binary_paths, unreadable_paths = ({p for p, s in statuses.items() if s == k} for k in ("binary", "unreadable"))
+    text_matches = {path: lines for path, lines in matches.items() if statuses[path] == "text"}
+    summary = f"{len(matches)} {'file' if len(matches) == 1 else 'files'} match."
     binary_list = "\n".join(f"{_display_path(path, git_root, display_root)} (binary)" for path in sorted(binary_paths))
+    unreadable_list = "\n".join(f"{_display_path(p, git_root, display_root)} (unreadable now)" for p in sorted(unreadable_paths))
     if not text_matches:
-        return _finish(_join(head, summary + ".", "Binary matches:\n" + binary_list, warning),
-                       event, started, "binary")
+        return _finish(_join(head, summary, "Binary matches:\n" + binary_list if binary_list else "",
+                             "Unreadable files:\n" + unreadable_list if unreadable_list else "", warning=warning),
+                       event, started, "unreadable" if unreadable_paths and not binary_paths else "binary")
     by_count = sorted(text_matches, key=lambda path: (-len(text_matches[path]), path))
     total_lines = sum(len(lines) for lines in text_matches.values())
     if len(text_matches) <= CODE_FILES and total_lines <= SMALL_LINES:
         body = "\n".join(f"{_display_path(path, git_root, display_root)}:{number}:{_clip(text)}"
                           for path in sorted(text_matches) for number, text in sorted(text_matches[path].items()))
-        body = _join(body, "Binary matches:\n" + binary_list if binary_paths else "", warning)
-        return _finish(_join(head, body), event, started, "small")
+        body = _join(body, "Binary matches:\n" + binary_list if binary_paths else "",
+                     "Unreadable files:\n" + unreadable_list if unreadable_paths else "")
+        return _finish(_join(head, summary, body, warning=warning), event, started, "small")
 
     scores, reason = _score(request, git_root, text_matches, started, cancel_event, env, event)
     event.update({"scored_files": len(scores)})
     rendered = _render(git_root, display_root, head, summary, text_matches, by_count, scores, reason,
-                       event.get("threshold", 0.5), binary_paths, warning)
+                       event.get("threshold", 0.5), binary_paths, unreadable_paths, warning)
     outcome = "ranked" if scores and not reason else "partly_ranked" if scores else "unranked"
     return _finish(rendered, event, started, outcome, reason=reason)
 
@@ -158,29 +160,21 @@ def _finish(text, event, started, outcome, **extra):
     return text, event
 
 
-def _scope(target, root):
-    relative = os.path.relpath(target, root).replace(os.sep, "/")
-    return ("in " if os.path.isfile(target) else "under ") + relative if relative != "." else ""
-
-
 def _display_path(path, git_root, display_root):
     return os.path.relpath(os.path.join(git_root, path), display_root).replace(os.sep, "/")
 
 
 def _too_broad(head, target, display_root, counts, complete, note="", warning=None):
-    target_dir = target if os.path.isdir(target) else os.path.dirname(target)
     folders = Counter(
         relative.split("/", 1)[0] if "/" in relative else "(top level)"
-        for path in counts for relative in [os.path.relpath(path, target_dir).replace(os.sep, "/")])
-    where = _scope(target, display_root)
+        for path in counts for relative in [os.path.relpath(path, target if os.path.isdir(target) else os.path.dirname(target)).replace(os.sep, "/")])
     ordered = sorted(folders.items(), key=lambda item: (-item[1], item[0]))
     rows = [f"{folder + '/' if folder != '(top level)' else folder}: {count}" for folder, count in ordered[:8]]
     if len(ordered) > 8:
         rows.append(f"+{len(ordered) - 8} more folders")
-    text = (f"{'at least ' if not complete or warning else ''}{len(counts)} matching files" +
-            (f" {where}" if where else "") + "; too broad to rank. Narrow with a path or glob.")
+    text = f"{'at least ' if not complete or warning else ''}{len(counts)} matching files; too broad to rank. Narrow with a path or glob."
     return _join(head, text + (" The scan may be incomplete." if not complete else "") +
-                 (f" {note}" if note else "") + ("\n" + "\n".join(rows) if rows else ""), warning)
+                 (f" {note}" if note else "") + ("\n" + "\n".join(rows) if rows else ""), warning=warning)
 
 
 def _score(request, root, matches, started, cancel_event, env, event):
@@ -241,19 +235,23 @@ def _score(request, root, matches, started, cancel_event, env, event):
     return scores, why
 
 
-def _render(root, display_root, head, summary, matches, by_count, scores, reason, threshold, binary_paths=(), warning=None):
-    ranked = sorted(scores, key=lambda path: -scores[path][0])
-    rest = [path for path in by_count if path not in scores]
-    if not scores:
+def _render(root, display_root, head, summary, matches, by_count, scores, reason, threshold,
+            binary_paths=(), unreadable_paths=(), warning=None):
+    unreadable_paths = set(unreadable_paths)
+    unreadable_paths.update(path for path in matches if _file_status(os.path.join(root, path), check_binary=False) == "unreadable")
+    readable_paths = matches.keys() - unreadable_paths
+    ranked = [path for path in sorted(scores, key=lambda path: -scores[path][0]) if path in readable_paths]
+    rest = [path for path in by_count if path not in scores and path in readable_paths]
+    if not ranked:
         title, code_paths = f"Unranked ({reason or 'no ranking'}); by match count.", rest[:CODE_FILES]
     else:
         title = "Ranked."
-        total_files = len(matches) + len(binary_paths)
-        if len(scores) < total_files:
-            title += f" Scored {len(scores)} of {total_files}; {reason or 'some files were not scorable'}."
+        total_files = len(readable_paths) + len(binary_paths) + len(unreadable_paths)
+        if len(ranked) < total_files:
+            title += f" Scored {len(ranked)} of {total_files}; {reason or 'some files were not scorable'}."
         code_paths = [path for path in ranked if scores[path][0] >= threshold][:CODE_FILES]
     blocks = [_code_block(root, display_root, path, matches[path], scores.get(path)) for path in code_paths]
-    parts = [head, f"{summary}. {title}", *blocks]
+    parts = [head, f"{summary} {title}", *blocks]
     keyword_paths = ranked[:2] if scores and not code_paths else []
     if keyword_paths:
         previews = []
@@ -263,17 +261,17 @@ def _render(root, display_root, head, summary, matches, by_count, scores, reason
             if len(matches[path]) > len(shown):
                 previews.append(f"{_display_path(path, root, display_root)}: +{len(matches[path]) - len(shown)} more")
         parts.append("Best keyword matches, not judged relevant:\n" + "\n".join(previews))
-    others = [path for path in ranked + rest if path not in code_paths and path not in keyword_paths]
+    unreadable_paths.update(path for path in matches if path not in unreadable_paths and _file_status(os.path.join(root, path), check_binary=False) == "unreadable")
+    others = [path for path in ranked + rest if path not in code_paths and path not in keyword_paths and path not in unreadable_paths]
     if others:
         listed = "\n".join(f"{_display_path(path, root, display_root)}: {_line_list(matches[path])}"
                             for path in others)
         parts.append("Other matches:\n" + listed)
-    if binary_paths:
-        parts.append("Binary matches:\n" + "\n".join(
-            f"{_display_path(path, root, display_root)} (binary)" for path in sorted(binary_paths)))
-    if warning:
-        parts.append(warning)
-    return _join(*parts)
+    for title, paths, label in (("Binary matches", binary_paths, "binary"), ("Unreadable files", unreadable_paths, "unreadable now")):
+        if paths:
+            parts.append(title + ":\n" + "\n".join(
+                f"{_display_path(path, root, display_root)} ({label})" for path in sorted(paths)))
+    return _join(*parts, warning=warning)
 
 
 def _code_block(root, display_root, path, lines, scored):
@@ -312,13 +310,13 @@ def _clip(text, limit=TEXT_CHARS):
     return text.rstrip("\r\n")[:limit] + ("..." if len(text.rstrip("\r\n")) > limit else "")
 
 
-def _has_nul(path):
+def _file_status(path, check_binary=True):
     try:
         with open(path, "rb") as source:
-            return any(b"\0" in chunk for chunk in iter(lambda: source.read(64 * 1024), b""))
+            return "text" if not check_binary or not any(b"\0" in chunk for chunk in iter(lambda: source.read(64 * 1024), b"")) else "binary"
     except OSError:
-        return True
+        return "unreadable"
 
 
-def _join(*parts):
-    return "\n\n".join(part for part in parts if part)
+def _join(*parts, warning=None):
+    return "\n\n".join(part for part in (*parts, warning) if part)

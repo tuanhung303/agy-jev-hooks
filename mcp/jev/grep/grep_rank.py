@@ -87,7 +87,7 @@ def _rg(filters, paths, counts, cwd, timeout_s, max_bytes):
     options = ["--color", "never"] + (["--count", "--with-filename"] if counts else
                                         ["--line-number", "--with-filename", "--no-heading",
                                          "--max-columns", "300", "--max-columns-preview"])
-    command = ["rg", *options, "--null", *filters, "--", *paths]
+    command = ["rg", *options, "--null", *filters, "--context=0", "-B0", "-A0", "--", *paths]
     try:
         process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)

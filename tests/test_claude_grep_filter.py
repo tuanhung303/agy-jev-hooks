@@ -328,6 +328,21 @@ def test_shared_rg_runner_handles_newline_filenames_for_hook(tmp_path):
     assert error is None and matches == {str(path): {1}}
 
 
+@pytest.mark.parametrize("context_flag", ["--context=1", "--before-context=1", "--after-context=1"])
+def test_shared_rg_runner_forces_record_shape_after_rg_config(tmp_path, monkeypatch, context_flag):
+    py = tmp_path / "source.py"
+    txt = tmp_path / "notes.txt"
+    py.write_text("before\nneedle\nafter\n", encoding="utf-8")
+    txt.write_text("before\nneedle\nafter\n", encoding="utf-8")
+    config = tmp_path / "ripgreprc"
+    config.write_text(f"{context_flag}\n--type=py\n--glob=*.py\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+
+    matches, error = hook.grep_matches(["-e", "needle"], [str(tmp_path)])
+
+    assert error is None and matches == {str(py): {2}}
+
+
 def test_non_search_bash_is_not_logged(monkeypatch, capsys):
     logged = []
     monkeypatch.setattr(hook, "_log", logged.append)
