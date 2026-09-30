@@ -75,6 +75,9 @@ class ScoreCache:
         self._max_bytes = max_bytes
         self._now = now or (lambda: int(time.time() * 1000))
         self.stats = CacheStats()
+        # Bytes on disk, measured on the first write and then counted up: re-measuring the whole
+        # cache on every write made a search's writes quadratic (0.2 s each at 8k entries).
+        self._known_bytes: Optional[int] = None
         try:
             os.makedirs(directory, exist_ok=True)
             self._usable = True
@@ -154,7 +157,9 @@ class ScoreCache:
                 handle.write(raw)
             os.replace(temporary, name)  # atomic: corruption stays local
             self.stats.writes += 1
-            self._evict()
+            self._known_bytes = self._total_bytes() if self._known_bytes is None else self._known_bytes + size
+            if self._known_bytes > self._max_bytes:
+                self._evict()
             return True
         except OSError:
             self.stats.failures += 1
@@ -199,23 +204,37 @@ class ScoreCache:
                     entries[relative] = 0  # corrupt/oversized entries evict first
         return entries
 
-    def _total_bytes(self) -> int:
-        total = 0
-        for name in self._list_entries():
+    def _sizes(self) -> Dict[str, int]:
+        """Entry name -> bytes, from directory stats only (no entry is opened)."""
+        sizes: Dict[str, int] = {}
+        try:
+            shards = [entry for entry in os.scandir(self.directory)
+                      if _SHARD_NAME.fullmatch(entry.name) and entry.is_dir()]
+        except OSError:
+            return sizes
+        for shard in shards:
             try:
-                total += os.path.getsize(os.path.join(self.directory, name))
+                for entry in os.scandir(shard.path):
+                    if _ENTRY_NAME.fullmatch(entry.name) and entry.name.startswith(shard.name):
+                        sizes[f"{shard.name}/{entry.name}"] = entry.stat().st_size
             except OSError:
-                pass
-        return total
+                continue
+        return sizes
+
+    def _total_bytes(self) -> int:
+        return sum(self._sizes().values())
 
     def _evict(self) -> None:
-        if self._total_bytes() <= self._max_bytes:
-            return
-        oldest = sorted(self._list_entries().items(), key=lambda item: (item[1], item[0]))
-        for name, _ in oldest:
-            if self._total_bytes() <= self._max_bytes:
-                break
-            self._discard(name)
+        sizes = self._sizes()
+        total = sum(sizes.values())
+        if total > self._max_bytes:
+            oldest = sorted(self._list_entries().items(), key=lambda item: (item[1], item[0]))
+            for name, _ in oldest:
+                if total <= self._max_bytes:
+                    break
+                if self._discard(name):
+                    total -= sizes.get(name, 0)
+        self._known_bytes = total
 
     def _discard(self, name: str) -> bool:
         try:

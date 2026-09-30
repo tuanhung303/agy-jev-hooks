@@ -234,3 +234,27 @@ def test_scheduler_retries_transient_and_stops_on_auth():
     })
     assert failures == [("PROVIDER_AUTH", False)]
     assert context.stop_reasons() == []  # reasons belong to the engine's handlers
+
+
+def test_cache_eviction_keeps_the_newest_entries_within_max_bytes(tmp_path):
+    clock = iter(range(1_000, 10_000_000, 1_000))
+    cache = ScoreCache(str(tmp_path), enabled=True, ttl_seconds=10, max_bytes=1_000,
+                       now=lambda: next(clock))
+    identities = [f"{n:064x}" for n in range(1, 21)]
+    meta = {"model_revision": "jev-1.13.0", "layout": "l", "criterion": "c", "chunker": "k"}
+    for identity in identities:
+        assert cache.write(identity, 0.5, meta)
+    assert cache._total_bytes() <= 1_000
+    assert cache.read(identities[-1]) == 0.5  # the newest entry survives
+    assert cache.read(identities[0]) is None  # the oldest was evicted
+
+
+def test_cache_write_does_not_rescan_the_cache(tmp_path, monkeypatch):
+    cache = ScoreCache(str(tmp_path), enabled=True, ttl_seconds=10, max_bytes=1_000_000)
+    meta = {"model_revision": "jev-1.13.0", "layout": "l", "criterion": "c", "chunker": "k"}
+    scans = []
+    real = cache._sizes
+    monkeypatch.setattr(cache, "_sizes", lambda: scans.append(1) or real())
+    for n in range(1, 31):
+        assert cache.write(f"{n:064x}", 0.5, meta)
+    assert len(scans) == 1  # measured once, then counted

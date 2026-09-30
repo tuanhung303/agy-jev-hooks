@@ -16,7 +16,9 @@ from what the agent saw (cut by head or a limit), or the list is long enough
 that order matters.
 
 Run it as an async hook with asyncRewake: the search never waits, and the hint
-reaches Claude as exit-2 stderr when Jev answers (5-25 s later).
+reaches Claude as exit-2 stderr when Jev answers (1-3 s later). A hint that
+lands after the turn ended is dropped: waking the agent for a finished search
+costs a whole turn and the agent ignores it.
 Modes (CLAUDE_GREP_FILTER_MODE): `shadow` (default) ranks and logs only, `hint`
 also tells Claude, `off`. The query is the user's recent prompts plus the Bash
 description of what the search is for.
@@ -49,7 +51,12 @@ BUDGET_S = float(os.environ.get("CLAUDE_GREP_FILTER_BUDGET_S", "60"))
 HINT_MIN_FILES = int(os.environ.get("CLAUDE_GREP_FILTER_HINT_MIN_FILES", "15"))
 MAX_SCOPE_ENTRIES, MAX_SCOPE_BYTES, MAX_QUERY_BYTES = 32, 4096, 8192  # request contract limits
 TASK_CHARS, RECENT_PROMPTS = 1500, 3
-SNIPPET_LINES = int(os.environ.get("CLAUDE_GREP_FILTER_SNIPPET_LINES", "12"))  # context kept around matches
+# Context kept around matches, and snippets scored per file. Jev's time grows with the bytes sent (gateway
+# requests hold 16 snippets / 64 KB); the file's best snippet decides its rank anyway.
+SNIPPET_LINES = int(os.environ.get("CLAUDE_GREP_FILTER_SNIPPET_LINES", "12"))
+SNIPPETS_PER_FILE = int(os.environ.get("CLAUDE_GREP_FILTER_SNIPPETS_PER_FILE", "2"))
+CONCURRENCY = int(os.environ.get("CLAUDE_GREP_FILTER_CONCURRENCY", "32"))  # parallel Jev requests
+TURN_TAIL_BYTES = 4 << 20  # transcript tail searched for the end of the search's turn
 REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 HANDLED_MODES = ("files_with_matches", "content")
 
@@ -310,20 +317,25 @@ def grep_matches(search_args, search_paths):
     return matches
 
 
-def snippet_mapper(lines, radius):
+def snippet_mapper(lines, radius, per_file=None):
     """Trim each candidate fragment to the span from `radius` lines before its first match to
-    `radius` after its last, and drop fragments with no match or the same matches as an
-    overlapping neighbour. Jev reads less unrelated text (its docs: filter first) and less is sent.
-    The excerpt header names the matched lines, which ranked a little better on labelled replays."""
+    `radius` after its last, and drop fragments with no match, the same matches as an
+    overlapping neighbour, or beyond the first `per_file` of their file (0: no cap). Jev reads
+    less unrelated text (its docs: filter first) and less is sent. The excerpt header names the
+    matched lines, which ranked a little better on labelled replays."""
     from dataclasses import replace
     from mcp.jev.grep.tokens import count_reference_tokens
-    seen = set()
+    per_file = SNIPPETS_PER_FILE if per_file is None else per_file
+    seen, kept = set(), defaultdict(int)
 
     def trim(fragment):
         found = sorted(n for n in lines.get(fragment.path, ()) if fragment.start_line <= n <= fragment.end_line)
         if not found or (fragment.path, tuple(found)) in seen:
             return None
+        if per_file and kept[fragment.path] >= per_file:
+            return None
         seen.add((fragment.path, tuple(found)))
+        kept[fragment.path] += 1
         start = max(fragment.start_line, found[0] - radius)
         end = min(fragment.end_line, found[-1] + radius)
         rows = re.findall(r"[^\n]*\n|[^\n]+$", fragment.text)
@@ -431,6 +443,35 @@ def run(payload):
                  matches, started)
 
 
+def turn_ended(transcript, tool_use_id):
+    """True once the turn that ran `tool_use_id` is over: a turn-end marker (main session) or an
+    end_turn reply (subagent) follows the call in the transcript. A call gone from the transcript's
+    tail is long past; one not written yet (short transcript) is still running."""
+    if not transcript or not tool_use_id:
+        return False
+    try:
+        with open(transcript, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - TURN_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    marker = json.dumps(tool_use_id)
+    start = next((i for i, line in enumerate(tail) if marker in line), None)
+    if start is None:
+        return size > TURN_TAIL_BYTES
+    for line in tail[start + 1:]:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") == "system" and entry.get("subtype") in ("turn_duration", "stop_hook_summary"):
+            return True
+        if entry.get("type") == "assistant" and (entry.get("message") or {}).get("stop_reason") == "end_turn":
+            return True
+    return False
+
+
 def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
     from mcp.jev.grep.config import ConfigurationError, find_profile_for, load_configuration
     from mcp.jev.grep.engine import SearchEngine
@@ -459,6 +500,7 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
 
     config = loaded["config"]
     config["search"]["deadline_ms"] = int(BUDGET_S * 1000)
+    config["search"]["concurrency"] = CONCURRENCY
     config["scan_caps"]["transmitted_bytes"] = MAX_BYTES  # refuses before dispatch, never truncates
 
     result = SearchEngine(loaded, env=dict(os.environ)).search(
@@ -508,6 +550,8 @@ def _rank(payload, event, tool_input, seen, cwd, search_path, matches, started):
     note = (f"Jev hint for the search {tool_input.get('pattern')!r} ({len(best)} files). Most relevant lines, "
             f"read these first{f' (under {base}/)' if base else ''}: " + ", ".join(entry(p) for p in top)
             + (f". {low} more scored below {threshold}" if low else "") + ". Nothing was hidden.")
+    if turn_ended(transcript, payload.get("tool_use_id")):
+        return None, {**event, "outcome": "late_dropped"}
     return note, {**event, "outcome": "hinted"}
 
 

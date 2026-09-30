@@ -94,6 +94,7 @@ def run_case(hook, case, corpus, build_query):
     lines = {os.path.relpath(os.path.realpath(path), root): found for path, found in matches.items()}
     config = loaded["config"]
     config["search"]["deadline_ms"] = 120_000
+    config["search"]["concurrency"] = hook.CONCURRENCY  # as the live hook sends
     config["scan_caps"]["transmitted_bytes"] = 2_000_000
     config["cache"]["enabled"] = False
     started = time.time()

@@ -466,3 +466,52 @@ def test_nothing_sendable_is_not_reported_as_ranked(repo, provider, monkeypatch)
 def test_paths_outside_the_working_directory_are_shown_absolute(tmp_path):
     assert hook._shown(str(tmp_path / "a" / "b.py"), str(tmp_path)) == "a/b.py"
     assert hook._shown(str(tmp_path / "a" / "b.py"), str(tmp_path / "other")) == str(tmp_path / "a" / "b.py")
+
+
+def test_snippets_are_capped_per_file():
+    from mcp.jev.grep.chunker import PreparedFragment
+
+    def fragment(start):
+        text = "".join(f"line {n}\n" for n in range(start, start + 10))
+        return PreparedFragment(id=f"f{start}", path="a.py", sha256="x", start_line=start, end_line=start + 9,
+                                byte_start=0, byte_end=len(text), text=text, byte_count=len(text),
+                                token_count=0, chunker="c")
+    lines = {"a.py": {5, 15, 25}}
+    capped = hook.snippet_mapper(lines, 1, per_file=2)
+    assert [capped(fragment(s)) is not None for s in (1, 11, 21)] == [True, True, False]
+    uncapped = hook.snippet_mapper(lines, 1, per_file=0)
+    assert all(uncapped(fragment(s)) is not None for s in (1, 11, 21))
+
+
+def _turn(tmp_path, *entries):
+    path = tmp_path / "turn.jsonl"
+    path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")
+    return str(path)
+
+
+CALL = {"type": "assistant", "message": {"stop_reason": "tool_use",
+                                         "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash"}]}}
+RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-1"}]}}
+
+
+def test_turn_ended_reads_the_turn_end_after_the_call(tmp_path):
+    working = _turn(tmp_path, CALL, RESULT, {"type": "assistant", "message": {"stop_reason": None}})
+    assert not hook.turn_ended(working, "tool-1")
+    main_done = _turn(tmp_path, CALL, RESULT, {"type": "system", "subtype": "turn_duration"})
+    assert hook.turn_ended(main_done, "tool-1")
+    agent_done = _turn(tmp_path, CALL, RESULT, {"type": "assistant", "message": {"stop_reason": "end_turn"}})
+    assert hook.turn_ended(agent_done, "tool-1")
+    earlier_end = _turn(tmp_path, {"type": "system", "subtype": "turn_duration"}, CALL, RESULT)
+    assert not hook.turn_ended(earlier_end, "tool-1")  # an end before the call is the previous turn
+    assert not hook.turn_ended(_turn(tmp_path, {"type": "user"}), "tool-1")  # call not flushed yet
+    assert not hook.turn_ended(None, "tool-1") and not hook.turn_ended(main_done, None)
+
+
+def test_hint_after_the_turn_ended_is_dropped(repo, provider, monkeypatch):
+    root, transcript = repo
+    monkeypatch.setattr(hook, "MODE", "hint")
+    monkeypatch.setattr(hook, "HINT_MIN_FILES", 5)
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "system", "subtype": "turn_duration"}) + "\n")
+    note, event = hook.run(_payload(root, transcript))
+    assert note is None and event["outcome"] == "late_dropped"
