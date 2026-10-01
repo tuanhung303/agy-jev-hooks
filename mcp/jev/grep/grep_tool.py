@@ -15,20 +15,20 @@ LIST_LINES, TEXT_CHARS = 6, 240
 
 TOOL_NAME = "jev_grep"
 TOOL_DESCRIPTION = (
-    "Regex search like rg, ranked for your task. Finds matching files under `path`, then returns code for the "
-    "best few and lists the other matches. Searches over 60 files are summarized by folder; narrow with a path "
-    "or glob. Use it for broad or exploratory searches; plain rg is fine for a known symbol or quick check."
+    "rg regex search, matched files ranked by Jev for `task`. Returns code from best few files, lists other "
+    "matches. Over 60 matching files: folder summary only; narrow with `path` or `glob`. Use for broad search by "
+    "behavior. Known symbol or one file: plain rg."
 )
 TOOL_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "pattern": {"type": "string", "description": "Regex, ripgrep syntax."},
-        "task": {"type": "string", "description": "One sentence: what you are looking for and why."},
-        "path": {"type": "string", "description": "File or folder to search, absolute or relative to the base."},
+        "pattern": {"type": "string", "description": "rg regex."},
+        "task": {"type": "string", "description": "One sentence: what you seek and why. Drives ranking."},
+        "path": {"type": "string", "description": "File or folder, absolute or relative to base folder. Default: base folder."},
         "glob": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
-                 "description": "ripgrep glob filters; multiple values follow ripgrep's ordered --glob behavior."},
-        "ignore_case": {"type": "boolean", "description": "Case-insensitive match."},
-        "no_ignore": {"type": "boolean", "description": "Search ignored files and directories."},
+                 "description": "rg --glob filters, applied in order."},
+        "ignore_case": {"type": "boolean", "description": "Case-insensitive."},
+        "no_ignore": {"type": "boolean", "description": "Also search files rg ignore rules skip."},
     },
     "required": ["pattern", "task"],
     "additionalProperties": False,

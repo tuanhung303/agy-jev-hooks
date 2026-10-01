@@ -83,7 +83,7 @@ def serve(input_stream=sys.stdin, output=sys.stdout, base=None, run=grep_tool.ru
                 "protocolVersion": requested if requested in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "jevgrep", "version": "2"},
-                "instructions": f"One tool: {grep_tool.TOOL_NAME}, rg ranked for your task. Base folder: {base}",
+                "instructions": f"{grep_tool.TOOL_NAME}: rg ranked by task. Base folder: {base}",
             })
         elif method == "ping":
             reply(call_id, {})
