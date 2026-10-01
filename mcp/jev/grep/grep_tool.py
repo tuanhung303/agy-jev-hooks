@@ -28,7 +28,7 @@ TOOL_INPUT_SCHEMA = {
         "glob": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
                  "description": "rg --glob filters, applied in order."},
         "ignore_case": {"type": "boolean", "description": "Case-insensitive."},
-        "no_ignore": {"type": "boolean", "description": "Also search files rg ignore rules skip."},
+        "no_ignore": {"type": "boolean", "description": "Also search gitignored files. Nested repo a parent ignores: pass its `path` instead."},
     },
     "required": ["pattern", "task"],
     "additionalProperties": False,
