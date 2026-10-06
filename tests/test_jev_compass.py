@@ -504,6 +504,37 @@ class CompassTurnScopeTests(unittest.TestCase):
 
 
 class CompassSupportTests(unittest.TestCase):
+    def test_successful_dbt_summary_is_not_failure_support(self):
+        blocks = {"command_receipts": "$ dbt build\n[exit=0]\nDone. PASS=76 WARN=9 ERROR=0",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "dbt build passed."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
+    def test_multiline_command_comment_is_not_failure_output(self):
+        blocks = {"command_receipts": '$ python3 -c "import subprocess\n# 1 failed reproduction"\n'
+                                       "[exit=0]\nok",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "Done."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
+    def test_repaired_failure_under_equivalent_runner_command_is_superseded(self):
+        blocks = {"command_receipts": "$ pytest -q\n[exit=1]\n1 failed\n\n"
+                                       "$ uv run pytest -q\n[exit=0]\n12 passed",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "Tests pass."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
+    def test_unrelated_failure_does_not_support_successful_dbt_claim(self):
+        blocks = {"command_receipts": "$ python -c 'import absent_example'\n[exit=1]\n"
+                                       "ModuleNotFoundError\n\n"
+                                       "$ dbt build\n[exit=0]\nDone. PASS=76 WARN=9 ERROR=0",
+                  "artifact_diffs": "<no file mutations>", "final_reply": "dbt build passed."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
+    def test_failure_for_different_claimed_path_is_not_support(self):
+        blocks = {"command_receipts": "$ pytest tests/integration/test_api.py\n[exit=1]\n"
+                                       "1 failed",
+                  "artifact_diffs": "<no file mutations>",
+                  "final_reply": "Tests pass for tests/unit/test_parser.py."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
     def test_expected_failure_that_passed_is_not_a_failure(self):
         blocks = {"command_receipts": "$ python3 check.py\n[exit=0]\n"
                                       "{'check': 'task_failed', 'expected': 'FAILED', 'actual': 'FAILED', 'pass': True}\n"

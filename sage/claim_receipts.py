@@ -53,9 +53,6 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
     outputs = {}
     calls = []
     positional = {}
-    positional_calls = []
-    positional_call_count = 0
-    positional_outputs = []
     duplicate_output_ids = set()
     call_ids = set()
     duplicate_call_ids = set()
@@ -69,41 +66,70 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
             if str(oid) in outputs:
                 duplicate_output_ids.add(str(oid))
             outputs[str(oid)] = step
-        elif step_type == "GENERIC":
-            positional_outputs.append(step)
         tool_calls = step.get("tool_calls")
         for call in tool_calls if isinstance(tool_calls, list) else []:
             if not isinstance(call, dict):
                 continue
             cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
-            if not cid:
-                positional_calls.append(call)
-                positional_call_count += 1
-            elif str(cid) in call_ids:
+            if cid and str(cid) in call_ids:
                 duplicate_call_ids.add(str(cid))
-            else:
+            elif cid:
                 call_ids.add(str(cid))
             if not _is_echo_command(_cmd_text(call)):
                 calls.append(call)
-    ambiguous = bool(duplicate_output_ids or duplicate_call_ids or (
-        positional_calls and positional_outputs and (
-            len(positional_calls) != len(positional_outputs)
-            or not all(_AGY_RESULT_RE.match(str(out.get("content") or ""))
-                       for out in positional_outputs))))
-    if positional_call_count > 1:
-        # Multiple ID-less calls have no reliable result identity or ordering,
-        # whether they came from one planner response or several.
-        ambiguous = True
+    ambiguous = bool(duplicate_output_ids or duplicate_call_ids)
     ambiguous_ids = duplicate_output_ids | duplicate_call_ids
-    if not ambiguous and positional_calls and len(positional_calls) == len(positional_outputs) \
-            and all(_AGY_RESULT_RE.match(str(out.get("content") or ""))
-                    for out in positional_outputs):
-        positional.update((id(call), step) for call, step in zip(positional_calls, positional_outputs))
+    # Bind only within a native serial window: one ID-less call followed by
+    # one native result before the next planner response or user turn. If a
+    # later planner starts while an earlier ID-less call is pending, their
+    # windows overlap and positional binding is unsafe.
+    pending = []
+    overlap_active = False
+    for idx, step in enumerate(steps or []):
+        stype = str(step.get("type") or "").upper() if isinstance(step, dict) else ""
+        if stype in {"PLANNER_RESPONSE", "USER_INPUT"}:
+            if stype == "USER_INPUT":
+                overlap_active = False
+            if pending:
+                overlap_active = True
+                ambiguous = True
+                for call in pending:
+                    positional[id(call)] = {"_capture_ambiguous": True}
+                pending = []
+            calls_in_step = step.get("tool_calls") if isinstance(step, dict) else None
+            batch = [c for c in calls_in_step if isinstance(c, dict) and not (
+                c.get("id") or c.get("tool_call_id") or c.get("call_id"))] \
+                if isinstance(calls_in_step, list) else []
+            if len(batch) == 1 and not overlap_active:
+                pending = batch
+            elif len(batch) > 1:
+                ambiguous = True
+                for call in batch:
+                    positional[id(call)] = {"_capture_ambiguous": True}
+                pending = []
+            elif batch and overlap_active:
+                ambiguous = True
+                for call in batch:
+                    positional[id(call)] = {"_capture_ambiguous": True}
+                pending = []
+        elif stype == "GENERIC" and pending:
+            content = str(step.get("content") or "")
+            if _AGY_RESULT_RE.match(content):
+                positional[id(pending[0])] = step
+                pending = []
+            else:
+                ambiguous = True
+                positional[id(pending[0])] = {"_capture_ambiguous": True}
+                pending = []
+    for call in pending:
+        positional[id(call)] = {"_capture_ambiguous": True}
     pairs = []
     for call in calls:
         cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
         result = outputs.get(str(cid)) if cid else positional.get(id(call))
         if cid and str(cid) in ambiguous_ids:
             result = None
+        if result is None and cid:
+            result = {"_capture_ambiguous": True}
         pairs.append((call, str((result or {}).get("content") or ""), result or {}))
     return pairs, ambiguous

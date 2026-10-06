@@ -30,6 +30,9 @@ _SUCCESS_RE = re.compile(r"\b(?:succeeded|completed successfully|successfully pa
 _FAILURE_RE = re.compile(r"\b(?:failed|failure|error|errors|cancelled|canceled|aborted)\b", re.I)
 _TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
 _TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
+_COMPILE_FAILURE_RE = re.compile(
+    r"\bCompilation Error\b|\b(?:error|diagnostic)\s+code\s*[:#=]?\s*[1-9]\d*\b|"
+    r"\bCould not find (?:ref|model|source)\b", re.I)
 
 
 def _status_ok(output, result_step=None):
@@ -120,11 +123,17 @@ def _counts_cover(sentence, pairs, command_text):
         return False
     observed = []
     zero_difference = False
+    count_query_seen = False
+    usable_observation = False
     for call, output, result_step in pairs:
         command = command_text(call)
-        if not _is_count_query(call, pairs, command_text) or not _status_ok(output, result_step):
+        if not _is_count_query(call, pairs, command_text):
             continue
+        count_query_seen = True
+        if not _status_ok(output, result_step):
+            return False
         labels, difference = _count_observation(output)
+        usable_observation = usable_observation or bool(labels or difference is not None)
         if difference == 0:
             zero_difference = True
         elif difference is not None:
@@ -144,17 +153,25 @@ def _counts_cover(sentence, pairs, command_text):
         elif "source" in command.lower():
             vals = _count_scalar_values(output)
             if vals:
+                usable_observation = True
                 observed.append((int(vals[0]), None))
         elif "target" in command.lower():
             vals = _count_scalar_values(output)
             if vals:
+                usable_observation = True
                 observed.append((None, int(vals[0])))
     sources = [source for source, _ in observed if source is not None]
     targets = [target for _, target in observed if target is not None]
     pair = (sources[0], targets[0]) if sources and targets else None
     consistent = bool(pair and len(set(sources)) == 1 and len(set(targets)) == 1
                       and pair[0] == pair[1] and (expected is None or pair == expected))
-    return consistent or bool(zero_difference and (expected is None or expected[0] == expected[1]))
+    if consistent or bool(zero_difference and (expected is None or expected[0] == expected[1])):
+        return True
+    if count_query_seen and not usable_observation:
+        return None
+    if count_query_seen and (not sources or not targets):
+        return None
+    return False
 
 
 def _unauditable_wrapper(pairs):
@@ -187,6 +204,8 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
         # explicit result for the operation named in this claim.
         uncertain_wrapper = _unauditable_wrapper(pairs) and not any(
             _claim_command_match(sentence, command_text(call), pairs)
+            and not re.search(r"\b(?:rg|grep|cat|sed|head|tail|less|more|ls|stat)\b",
+                              command_text(call), re.I)
             for call, _output, _result in pairs)
         if DBT_CLAIM_RE.search(sentence):
             match = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
@@ -225,15 +244,20 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
                 zero_errors = bool(count and int(count.group(1)) == 0)
                 success = status == "0" or (status == "unknown" and (
                     _SUCCESS_RE.search(text) or zero_errors))
-                return valid_command and success and not positive_errors and status not in ("error",)
+                return (valid_command and success and not positive_errors
+                        and not _COMPILE_FAILURE_RE.search(text) and status not in ("error",))
             if not any(compile_receipt(call, output, result) for call, output, result in pairs):
                 if uncertain_wrapper:
                     continue
                 return False
-        if DATA_CLAIM_RE.search(sentence) and not _counts_cover(sentence, pairs, command_text):
-            if uncertain_wrapper:
+        if DATA_CLAIM_RE.search(sentence):
+            counts_result = _counts_cover(sentence, pairs, command_text)
+            if counts_result is None:
                 continue
-            return False
+            if not counts_result:
+                if uncertain_wrapper:
+                    continue
+                return False
     return True
 
 

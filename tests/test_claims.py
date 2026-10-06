@@ -346,8 +346,121 @@ print("Everything is ready. dbt build passed.")
         ]
         pairs, ambiguous = _call_output_pairs(steps)
         self.assertTrue(ambiguous)
+
+    def test_serial_native_idless_windows_bind_each_result(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"command": "true"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nCompleted At: now\n"
+             "The command exited with code 0.\nOutput:\nfirst"},
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"command": "pytest -q"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nCompleted At: now\n"
+             "The command exited with code 1.\nOutput:\n1 failed"},
+        ]
+        pairs, ambiguous = claims._call_output_pairs(steps)
+        self.assertFalse(ambiguous)
+        self.assertEqual([pair[2].get("content") for pair in pairs], [
+            steps[1]["content"], steps[3]["content"]])
+        self.assertIn("test claim", claims.uncovered_claims("Tests pass.", steps)[0])
+
+    def test_explicit_failed_operation_survives_unrelated_idless_ambiguity(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"command": "true"}},
+                {"name": "run_command", "args": {"command": "echo unrelated"}},
+                {"name": "run_command", "id": "dbt-1", "args": {"command": "dbt build"}},
+            ]},
+            {"type": "GENERIC", "content": "Created At: now\nexit=0"},
+            _out("dbt-1", "Done. PASS=0 ERROR=1\nexit=1"),
+        ]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims("dbt build passed.", steps)[0])
+
+    def test_native_count_table_maps_values_by_header_column(self):
+        from sage.pipeline_receipts import count_observation
+        equal = """Created At: now
+exit=0
+batch_id source_count target_count
+-------- ------------ ------------
+1        120          120
+(1 rows affected)"""
+        unequal = equal.replace("120          120", "120          119")
+        self.assertEqual(count_observation(equal)[0], {"source": 120, "target": 120})
+        self.assertEqual(count_observation(unequal)[0], {"source": 120, "target": 119})
+        self.assertEqual(claims.uncovered_claims(
+            "Row counts match: 120 and 120.",
+            [_call("run_command", {"command": "sqlcmd -Q 'select 1 as batch_id, count(*) as source_count, count(*) as target_count'"}, "q"),
+             _out("q", equal)])[0:1], [])
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(
+            "Row counts match.",
+            [_call("run_command", {"command": "sqlcmd -Q 'select 1 as batch_id, count(*) as source_count, count(*) as target_count'"}, "q"),
+             _out("q", unequal)])[0])
+
+    def test_structured_and_difference_count_receipts_are_supported(self):
+        cases = [
+            ('[{"source_count":"120","target_count":"120"}]', ""),
+            ("difference\n----------\n0\n(1 rows affected)", ""),
+        ]
+        from sage.pipeline_receipts import count_observation
+        self.assertEqual(count_observation(cases[0][0])[0], {"source": 120, "target": 120})
+        self.assertEqual(count_observation(cases[1][0])[1], 0)
+
+    def test_unrecognized_count_schema_abstains(self):
+        steps = [_call("run_command", {"command": "select count(*) from source"}, "q"),
+                 _out("q", "unexpected result shape")]
+        self.assertEqual(claims.uncovered_claims("Data reconciled.", steps), [])
+
+    def test_inspection_text_does_not_cancel_opaque_wrapper_uncertainty(self):
+        steps = [
+            _call("run_command", {"command": "python3 -c \"import subprocess; subprocess.run(['dbt', 'build'], check=True)\""}, "wrap"),
+            _out("wrap", "exit=0\nDone. PASS=76 WARN=9 ERROR=0"),
+            _call("run_command", {"command": "rg 'dbt build' README.md"}, "search"),
+            _out("search", "exit=0\ndbt build"),
+        ]
+        self.assertEqual(claims.uncovered_claims("dbt build passed.", steps), [])
+
+    def test_status_id_are_never_borrowed_from_different_records(self):
+        from sage.pipeline_receipts import run_id, terminal_status
+        output = '{"id":"target-run"}\n{"id":"old-run","status":"Completed"}'
+        self.assertEqual(run_id(output), "")
+        self.assertEqual(terminal_status(output), "")
+        steps = [_call("run_command", {"command": "cloud job status target-run"}, "s"),
+                 _out("s", "exit=0\n" + output)]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(
+            "Pipeline target-run completed.", steps)[0])
+
+    def test_compile_error_text_overrides_zero_exit_pipe(self):
+        steps = [_call("run_command", {"command": "dbt compile | tail -5"}, "c"),
+                 _out("c", "exit=0\nCompilation Error\nCould not find ref example_model")]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims("Compiled clean.", steps)[0])
+
+    def test_missing_result_is_unauditable_for_attempted_operation(self):
+        steps = [_call("run_command", {"command": "dbt build"}, "missing")]
+        self.assertEqual(claims.uncovered_claims("dbt build passed.", steps), [])
+
+    def test_natural_multicall_turn_binds_serial_mixed_receipts(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                {"name": "run_command", "args": {"command": "git status --short"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nCompleted At: now\n"
+             "The command exited with code 0.\nOutput:\nworking tree clean"},
+            {"type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                {"name": "run_command", "args": {"command": "pytest -q tests/unit"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nCompleted At: now\n"
+             "The command exited with code 0.\nOutput:\n12 passed"},
+            {"type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                {"name": "run_command", "args": {"command": "dbt build"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nCompleted At: now\n"
+             "The command exited with code 1.\nOutput:\nCompilation Error"},
+        ]
+        pairs, ambiguous = claims._call_output_pairs(steps)
+        self.assertFalse(ambiguous)
+        self.assertEqual([pair[1].splitlines()[-1] for pair in pairs],
+                         ["working tree clean", "12 passed", "Compilation Error"])
+        self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
+        self.assertIn("pipeline/data claim", claims.uncovered_claims("dbt build passed.", steps)[0])
         pytest_pair = next(pair for pair in pairs if "pytest -q" in str(pair[0].get("args")))
-        self.assertNotIn("exited with code 0", pytest_pair[1])
+        self.assertIn("exited with code 0", pytest_pair[1])
         self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
 
     def test_agy_echo_call_does_not_shift_receipt_pairing(self):
@@ -467,7 +580,8 @@ print("Everything is ready. dbt build passed.")
         steps = [{"type": "USER_INPUT", "content": "What does SCD2 mean?"}]
         self.assertIsNone(claims.claim_contract_hint(
             "All tests pass and done.", steps, require_action=True))
-        executed = steps + [_call("run_command", {"command": "pytest"}, "q1")]
+        executed = steps + [_call("run_command", {"command": "true"}, "q1"),
+                            _out("q1", "exit=0")]
         self.assertIsNotNone(claims.claim_contract_hint(
             "All tests pass and done.", executed, require_action=True))
 
@@ -475,7 +589,8 @@ print("Everything is ready. dbt build passed.")
 class HintShapeTests(unittest.TestCase):
     def test_hint_matches_compass_shape(self):
         hint = claims.claim_contract_hint("Done. Tests pass.", [
-            {"type": "USER_INPUT"}, _call("run_command", {"command": "pytest"}, "t1")],
+            {"type": "USER_INPUT"}, _call("run_command", {"command": "true"}, "t1"),
+            _out("t1", "exit=0")],
             require_action=True)
         self.assertTrue(hint.startswith("jev_compass not_verified:"), hint)
         self.assertIn("Evidence:", hint)

@@ -8,7 +8,11 @@ label the whole steer is suppressed. Stdlib only, no classification.
 import re
 from typing import Any, Dict, List, Optional
 
-from sage.claims import TEST_CLAIM_RE, assertion_claims, claim_targets, host_of
+from sage.claims import (
+    BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE,
+    PIPELINE_CLAIM_RE, TEST_CLAIM_RE, _same_scope, assertion_claims, claim_targets, host_of,
+)
+from sage.claim_assertions import _claim_sentences
 
 # Absence-type labels accept a scoped gap; every other label needs an observed
 # failure.
@@ -16,7 +20,6 @@ GAP_LABELS = frozenset({
     "not_verified", "undone", "premature_stop", "delivery_condition",
     "blast_radius_unchecked", "faked_evidence",
 })
-_STATUS_RE = re.compile(r"\[exit=([^\]\n]+)\]")
 # A failure summary stands alone; a bare error keyword only counts when the
 # receipt also recorded a non-zero status. Unknown status is neutral.
 _FAILURE_SUMMARY_RE = re.compile(
@@ -27,11 +30,13 @@ _FAILED_TOKEN_RE = re.compile(r"\bFAILED\b")
 _QUOTED_STATUS_RE = re.compile(r"""["']FAILED["']""")
 # A check result that expected the failure and saw it: "expected FAILED, actual FAILED, pass True".
 _PASS_VERDICT_RE = re.compile(r"(?i:\bpass['\"]?\s*[:=]\s*true\b)|\bTrue\s*$")
-_ERROR_KEYWORD_RE = re.compile(r"\b(?:Traceback|AssertionError|SyntaxError|ModuleNotFoundError)\b")
+_ERROR_KEYWORD_RE = re.compile(
+    r"\b(?:Compilation Error|Traceback|AssertionError|SyntaxError|ModuleNotFoundError)\b")
 _RUNNER_RESULT_RE = re.compile(
     r"\b\d+\s+(?:passed|failed|passing|failing)\b|\bFAILED\b|\bexit=0\b|#\s*(?:pass|fail)\s+\d+", re.I)
 _NOISE_COMMAND_RE = re.compile(
     r"\b(?:tail|head|cat|bat|less|wc)\b[^\n]*\.jsonl|\bUpdated task #\d+ status\b", re.I)
+_DBT_SUMMARY_RE = re.compile(r"\bDone\.[^\n]*\bPASS\s*=\s*\d+[^\n]*\bERROR\s*=\s*(\d+)", re.I)
 
 
 def bounded(text: Any, cap: int) -> str:
@@ -43,11 +48,6 @@ def _receipt_paragraphs(blocks: Dict[str, str]) -> List[str]:
     return [p for p in str(blocks.get("command_receipts") or "").split("\n\n") if p.strip()]
 
 
-def _receipt_lines(paragraph: str) -> List[str]:
-    return [line.strip() for line in paragraph.splitlines()
-            if line.strip() and not line.strip().startswith("=== ")]
-
-
 def _failure_line(lines: List[str]) -> str:
     for line in lines:
         if line.startswith(("[", "$ ")) or _PASS_VERDICT_RE.search(line):
@@ -57,36 +57,110 @@ def _failure_line(lines: List[str]) -> str:
     return ""
 
 
+def _receipt_fields(paragraph: str):
+    """Keep multiline command, status, and output in separate fields."""
+    lines = [line.rstrip() for line in paragraph.splitlines() if line.strip()
+             and not line.strip().startswith("=== ")]
+    if not lines or not lines[0].lstrip().startswith("$ "):
+        return "", "unknown", []
+    status_index = next((i for i, line in enumerate(lines)
+                         if re.fullmatch(r"\[exit=[^\]\n]+\]", line.strip())), None)
+    if status_index is None:
+        return "\n".join(lines).removeprefix("$ "), "unknown", []
+    command_lines = lines[:status_index]
+    command_lines[0] = command_lines[0].lstrip()[2:]
+    command = "\n".join(command_lines).strip()
+    status = lines[status_index].strip()[6:-1]
+    return "$ " + command, status, lines[status_index + 1:]
+
+
+def _normalize_command(command: str) -> str:
+    value = re.sub(r"\s+", " ", str(command or "")).strip().casefold()
+    value = re.sub(r"^(?:uv\s+run\s+)+", "", value)
+    value = re.sub(r"^(?:python|python3)\s+-m\s+", "", value)
+    return value
+
+
+def _same_runner_scope(left: str, right: str) -> bool:
+    a, b = _normalize_command(left), _normalize_command(right)
+    if a == b:
+        return True
+    runner = re.compile(r"\b(pytest|unittest|jest|vitest|mocha|rspec|phpunit|tox|cargo\s+test|go\s+test)\b")
+    ma, mb = runner.search(a), runner.search(b)
+    return bool(ma and mb and ma.group(1) == mb.group(1)
+                and a[ma.end():].strip() == b[mb.end():].strip())
+
+
+def _claim_matches_command(claim: str, command: str) -> bool:
+    command = str(command or "")
+    paths, urls = claim_targets(claim)
+    if paths and not _same_scope(command, paths):
+        return False
+    if urls and not any(host and host in command.casefold() for host in
+                        (host_of(url) for url in urls)):
+        return False
+    if DBT_CLAIM_RE.search(claim):
+        action = re.search(r"\bdbt\s+(build|run|test)\b", claim, re.I)
+        return bool(action and re.search(rf"\bdbt\s+{action.group(1)}\b", command, re.I))
+    if TEST_CLAIM_RE.search(claim):
+        return bool(re.search(r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|phpunit|tox|cargo test|go test)\b",
+                              command, re.I))
+    if COMPILE_CLAIM_RE.search(claim):
+        action = re.search(r"\b(compile|parse|compiled)\b", claim, re.I)
+        term = "parse" if action and action.group(1).lower() == "parse" else "compile"
+        return bool(re.search(rf"\b(?:dbt\s+)?{term}\b|\btsc(?:\s|$)", command, re.I))
+    if DATA_CLAIM_RE.search(claim):
+        return bool(re.search(r"\bselect\b[\s\S]*\bcount\s*\(", command, re.I))
+    if PIPELINE_CLAIM_RE.search(claim):
+        return bool(re.search(r"\b(?:status|show|view|describe|get|list)\b|/jobs/instances/", command, re.I))
+    return True
+
+
 def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
     """A receipt that shows an actual failure. A status alone never is one."""
     paragraphs = _receipt_paragraphs(blocks)
+    reply = str(blocks.get("final_reply") or "")
+    claims = assertion_claims(reply)
+    for pattern in (DBT_CLAIM_RE, BUILD_CLAIM_RE, COMPILE_CLAIM_RE,
+                    DATA_CLAIM_RE, PIPELINE_CLAIM_RE):
+        claims.extend(_claim_sentences(reply, pattern))
+    scoped_claim = claims[-1] if claims else ""
     for index, paragraph in enumerate(paragraphs):
-        lines = _receipt_lines(paragraph)
+        command, status_value, output_lines = _receipt_fields(paragraph)
+        lines = output_lines
         if not lines or _NOISE_COMMAND_RE.search(lines[0]):
             continue
-        status = _STATUS_RE.search(lines[1]) if len(lines) > 1 else None
-        bad_status = bool(status) and status.group(1).lower() not in ("0", "unknown")
-        signal = _failure_line(lines[1:])
+        status = status_value if status_value not in ("unknown", "") else ""
+        bad_status = bool(status) and status.lower() not in ("0", "unknown")
+        dbt_summary = _DBT_SUMMARY_RE.search("\n".join(lines))
+        signal = "" if dbt_summary and int(dbt_summary.group(1)) == 0 else _failure_line(lines)
         if not signal and bad_status:
             signal = next((line for line in lines[1:] if _ERROR_KEYWORD_RE.search(line)), "")
+        if not signal and dbt_summary and int(dbt_summary.group(1)) > 0:
+            signal = dbt_summary.group(0)
         if not signal:
             continue
-        command = re.sub(r"\s+", " ", lines[0]).strip().casefold()
+        command_key = _normalize_command(command)
+        if scoped_claim and not _claim_matches_command(scoped_claim, command):
+            continue
         # A later successful rerun of the same captured command supersedes
-        # its earlier failure for current-turn support.
+        # its earlier failure for current-turn support. Runner-equivalent
+        # invocations such as pytest and uv run pytest share a scope.
         superseded = False
         for later in paragraphs[index + 1:]:
-            later_lines = _receipt_lines(later)
-            if len(later_lines) < 2 or re.sub(r"\s+", " ", later_lines[0]).strip().casefold() != command:
+            later_command, later_status, later_output = _receipt_fields(later)
+            if not later_command or not (command_key == _normalize_command(later_command)
+                                         or _same_runner_scope(command, later_command)):
                 continue
-            later_status = _STATUS_RE.search(later_lines[1])
-            if later_status and later_status.group(1).lower() == "0":
+            later_summary = _DBT_SUMMARY_RE.search("\n".join(later_output))
+            if later_status.lower() == "0" and not _failure_line(later_output) \
+                    and not (later_summary and int(later_summary.group(1)) > 0):
                 superseded = True
                 break
         if superseded:
             continue
-        code = f" {status.group(0)}" if status else ""
-        return f"command_receipts: {bounded(lines[0], 90)}{code} -> {bounded(signal, 120)}"
+        code = f" [exit={status}]" if status else ""
+        return f"command_receipts: {bounded(command, 90)}{code} -> {bounded(signal, 120)}"
     earlier_artifact = False
     for raw_line in str(blocks.get("artifact_diffs") or "").splitlines():
         if raw_line.startswith("# "):
