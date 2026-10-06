@@ -106,6 +106,14 @@ class GuardTests(HookContractTestCase):
         self.gate_mock.assert_not_called()
         self.assertIn("fullyIdle is False", self.hook.LOG_PATH.read_text())
 
+    def test_fully_idle_false_logs_claim_only_without_steering(self):
+        self.claims_mock.return_value = "claim gap: pipeline receipt missing"
+        code, out = self.run_main(self.payload(fullyIdle=False))
+        self.assertEqual((code, out), (0, {}))
+        self.assertIn("WOULD_CLAIM_BG", self.hook.LOG_PATH.read_text())
+        self.gate_mock.assert_not_called()
+        self.assertEqual(self.hook.steer_count(self.payload()["conversationId"]), 0)
+
     def test_non_model_stop_termination_reasons_abstain(self):
         for reason in ("error", "max_steps_exceeded", "user_cancel", "aborted", "ERROR", "USER_CANCELED"):
             with self.subTest(reason=reason):
@@ -276,11 +284,11 @@ class TranscriptExtractionTests(unittest.TestCase):
 
 
 class ShadowModeTests(HookContractTestCase):
-    """Without AGY_STOP_AUDIT_MODE=block a fired gate is logged, never steered."""
+    """Global shadow mode logs a fired gate, never steers."""
 
     def setUp(self):
         super().setUp()
-        self.hook.os.environ.pop("AGY_STOP_AUDIT_MODE", None)
+        self.hook.os.environ["AGY_STOP_AUDIT_MODE"] = "shadow"
 
     def test_fired_gate_passes_and_logs_would_steer(self):
         self.claims_mock.return_value = "claim gap: no runner result"
@@ -293,6 +301,78 @@ class ShadowModeTests(HookContractTestCase):
         for _ in range(3):
             self.run_main(self.payload())
         self.assertEqual(self.hook.steer_count(self.payload()["conversationId"]), 0)
+
+
+class PerTagModeTests(HookContractTestCase):
+    def _run_hint(self, tag):
+        self.claims_mock.return_value = None
+        self.gate_mock.return_value = None
+        self._mode_run = getattr(self, "_mode_run", 0) + 1
+        if tag == "CLAIM":
+            self.claims_mock.return_value = "claim gap: missing receipt"
+        elif tag == "FAIL":
+            self.gate_mock.return_value = "Compass hard failure"
+        elif tag == "SKILL":
+            with mock.patch.object(self.hook, "stop_skill_steer", return_value="skill hint"):
+                return self.run_main(self.payload(conversationId=f"mode-{tag}-{self._mode_run}"))
+        else:
+            with mock.patch.object(self.hook, "casual_restyle_hint", return_value="casual hint"):
+                return self.run_main(self.payload(conversationId=f"mode-{tag}-{self._mode_run}"))
+        return self.run_main(self.payload(conversationId=f"mode-{tag}-{self._mode_run}"))
+
+    def test_default_blocks_claim_and_fail_but_shadows_skill_and_casual(self):
+        for name in ("AGY_STOP_AUDIT_MODE", "AGY_STOP_AUDIT_BLOCK_TAGS"):
+            self.hook.os.environ.pop(name, None)
+        for tag in ("CLAIM", "FAIL"):
+            with self.subTest(tag=tag):
+                code, out = self._run_hint(tag)
+                self.assertEqual(code, 0)
+                self.assertEqual(out.get("decision"), "continue")
+        for tag in ("SKILL", "CASUAL"):
+            with self.subTest(tag=tag):
+                code, out = self._run_hint(tag)
+                self.assertEqual((code, out), (0, {}))
+                self.assertIn(f"WOULD_{tag}", self.hook.LOG_PATH.read_text())
+
+    def test_mode_shadow_forces_all_tags_to_shadow(self):
+        with mock.patch.dict(self.hook.os.environ, {"AGY_STOP_AUDIT_MODE": "shadow"}):
+            code, out = self._run_hint("CLAIM")
+        self.assertEqual((code, out), (0, {}))
+        self.assertIn("WOULD_CLAIM", self.hook.LOG_PATH.read_text())
+
+    def test_global_shadow_mode_skips_later_remote_gates_after_finding(self):
+        self.claims_mock.return_value = "claim gap: missing receipt"
+        with mock.patch.dict(self.hook.os.environ, {"AGY_STOP_AUDIT_MODE": "shadow"}):
+            code, out = self.run_main(self.payload(conversationId="global-shadow-short-circuit"))
+        self.assertEqual((code, out), (0, {}))
+        self.gate_mock.assert_not_called()
+
+    def test_mode_block_forces_all_tags_to_block(self):
+        with mock.patch.dict(self.hook.os.environ, {"AGY_STOP_AUDIT_MODE": "block"}):
+            code, out = self._run_hint("SKILL")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.get("decision"), "continue")
+
+    def test_custom_block_tag_list(self):
+        env = {"AGY_STOP_AUDIT_BLOCK_TAGS": "SKILL", "AGY_STOP_AUDIT_MODE": ""}
+        with mock.patch.dict(self.hook.os.environ, env):
+            skill_code, skill_out = self._run_hint("SKILL")
+            claim_code, claim_out = self._run_hint("CLAIM")
+        self.assertEqual(skill_out.get("decision"), "continue")
+        self.assertEqual((claim_code, claim_out), (0, {}))
+        self.assertIn("WOULD_CLAIM", self.hook.LOG_PATH.read_text())
+
+    def test_shadowed_claim_does_not_mask_configured_fail_block(self):
+        env = {"AGY_STOP_AUDIT_BLOCK_TAGS": "FAIL", "AGY_STOP_AUDIT_MODE": ""}
+        self.claims_mock.return_value = "claim gap: missing receipt"
+        self.gate_mock.return_value = "Compass hard failure"
+        with mock.patch.dict(self.hook.os.environ, env):
+            code, out = self.run_main(self.payload(conversationId="claim-shadow-fail-block"))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.get("decision"), "continue")
+        logged = self.hook.LOG_PATH.read_text()
+        self.assertIn("WOULD_CLAIM", logged)
+        self.assertIn("FAIL session=", logged)
 
 
 if __name__ == "__main__":

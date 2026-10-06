@@ -9,8 +9,9 @@ If an audit issue is detected, emits `{"decision": "continue", "reason": "[agy-s
 so the Antigravity language_server re-invokes the agent loop with steering context.
 Otherwise emits `{}` to permit normal termination.
 
-Shadow by default: a fired gate is logged as WOULD_<tag> and the stop passes
-with `{}`. AGY_STOP_AUDIT_MODE=block turns the steer on.
+Default policy blocks CLAIM and FAIL; SKILL and CASUAL are shadowed.
+AGY_STOP_AUDIT_MODE=shadow shadows every tag; AGY_STOP_AUDIT_MODE=block blocks every tag.
+AGY_STOP_AUDIT_BLOCK_TAGS overrides the default tag set.
 
 Safety and Loop Prevention:
 1. fullyIdle check: when subagents or background tasks are running (fullyIdle=False),
@@ -138,7 +139,39 @@ def bump_steer_count(session_id):
         pass
 
 
-def last_turn_snippets(transcript_path):
+def tag_should_block(tag):
+    """Resolve legacy global mode first, then the per-tag default."""
+    mode = os.environ.get("AGY_STOP_AUDIT_MODE", "").strip().lower()
+    if mode == "shadow":
+        return False
+    if mode == "block":
+        return True
+    tags = os.environ.get("AGY_STOP_AUDIT_BLOCK_TAGS", "CLAIM,FAIL")
+    return str(tag).strip().upper() in {part.strip().upper() for part in tags.split(",") if part.strip()}
+
+
+def audit_background_claim(payload):
+    """Run only the deterministic claim check while background work is active."""
+    try:
+        session_id = str(payload.get("conversationId") or payload.get("session_id")
+                         or payload.get("sessionId") or "")
+        transcript_path = resolve_transcript_path(payload, session_id)
+        if not session_id or not transcript_path:
+            return
+        snippets = last_turn_snippets(transcript_path, include_steps=True)
+        if not snippets:
+            return
+        turn_steps = snippets[2] if len(snippets) > 2 else None
+        hint = claim_contract_hint_for(snippets[1], transcript_path,
+                                       require_action=True, steps=turn_steps)
+        action = emit_steer(hint) if hint else None
+        if action:
+            log(f"WOULD_CLAIM_BG session={session_id}: {action}")
+    except Exception as exc:
+        log(f"background claim check unavailable: {exc}")
+
+
+def last_turn_snippets(transcript_path, include_steps=False):
     """Extract the last explicit user prompt and the last assistant response."""
     steps = _read_transcript_steps(transcript_path)
     if not steps:
@@ -153,7 +186,8 @@ def last_turn_snippets(transcript_path):
                 reply = content
     if not prompt or not reply:
         return None
-    return prompt[-SNIPPET_LIMIT:], reply
+    snippets = (prompt[-SNIPPET_LIMIT:], reply)
+    return (*snippets, steps) if include_steps else snippets
 
 
 def jev_verifier_hint(prompt, reply, transcript_path=""):
@@ -213,6 +247,7 @@ def main():
 
     # Subagent and background task safety: never block when subagents are active
     if payload.get("fullyIdle") is False:
+        audit_background_claim(payload)
         log("fullyIdle is False; abstaining to preserve reactive wakeups")
         sys.stdout.write(json.dumps({}))
         return 0
@@ -249,43 +284,39 @@ def main():
         sys.stdout.write(json.dumps({}))
         return 0
 
-    snippets = last_turn_snippets(transcript_path)
+    snippets = last_turn_snippets(transcript_path, include_steps=True)
     if snippets is None:
         log(f"no snippet pair extracted for session={session_id}")
         sys.stdout.write(json.dumps({}))
         return 0
-    prompt, reply = snippets
+    prompt, reply = snippets[:2]
+    turn_steps = snippets[2] if len(snippets) > 2 else None
 
-    # Gate chain:
-    # 1. Claim contract: deterministic test/deploy/visual receipt verification
-    hint = claim_contract_hint_for(reply, transcript_path)
-    tag, limit = "CLAIM", STEER_TEXT_LIMIT
-
-    # 2. Jev Compass classifier: remote hard-label verification
-    if not hint:
-        hint = jev_verifier_hint(prompt, reply, transcript_path)
-        tag, limit = "FAIL", STEER_TEXT_LIMIT
-
-    # 3. Stop-phase skill steer
-    if not hint:
-        hint = stop_skill_steer(prompt, reply)
-        tag, limit = "SKILL", SKILL_TEXT_LIMIT
-
-    # 4. Casual restyle hint
-    if not hint:
-        hint = casual_restyle_hint(reply)
-        tag, limit = "CASUAL", STEER_TEXT_LIMIT
-
-    if hint:
+    # Shadow findings must not mask a later tag configured to block.
+    gates = (
+        ("CLAIM", lambda: claim_contract_hint_for(
+            reply, transcript_path, require_action=True, steps=turn_steps), STEER_TEXT_LIMIT),
+        ("FAIL", lambda: jev_verifier_hint(prompt, reply, transcript_path), STEER_TEXT_LIMIT),
+        ("SKILL", lambda: stop_skill_steer(prompt, reply), SKILL_TEXT_LIMIT),
+        ("CASUAL", lambda: casual_restyle_hint(reply), STEER_TEXT_LIMIT),
+    )
+    for tag, evaluate, limit in gates:
+        try:
+            hint = evaluate()
+        except Exception as exc:
+            log(f"{tag} gate unavailable: {exc}")
+            continue
+        if not hint:
+            continue
         action = emit_steer(hint, limit)
         if not action:
             log(f"{tag} suppressed: sanitizer unavailable or failed")
-            sys.stdout.write(json.dumps({}))
-            return 0
-        if os.environ.get("AGY_STOP_AUDIT_MODE") != "block":
+            continue
+        if not tag_should_block(tag):
             log(f"WOULD_{tag} session={session_id}: {action}")
-            sys.stdout.write(json.dumps({}))
-            return 0
+            if os.environ.get("AGY_STOP_AUDIT_MODE", "").strip().lower() == "shadow":
+                break
+            continue
         bump_steer_count(session_id)
         log(f"{tag} session={session_id}: {action}")
         sys.stdout.write(json.dumps({

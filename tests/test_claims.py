@@ -1,4 +1,6 @@
 """Unit tests for the claim to receipt contract (sage.claims)."""
+import json
+import tempfile
 import unittest
 
 from sage import claims
@@ -35,6 +37,13 @@ class UncoveredClaimTests(unittest.TestCase):
         covered = [_call("run_command", {"command": "curl -s https://app.example.com/health"}, "c1"),
                    _out("c1", "exit=0\n{\"status\":\"ok\"}")]
         self.assertEqual(claims.uncovered_claims("Deployed, is live.", covered), [])
+
+    def test_published_data_terms_are_not_deploy_claims(self):
+        for reply in ("The published measures are selected at run time.",
+                      "Daily cohort union across all published attempts.",
+                      "Publication status evaluates to published if all expected rules pass."):
+            with self.subTest(reply=reply):
+                self.assertEqual(claims.uncovered_claims(reply, []), [])
 
     def test_deploy_claim_covered_by_target_state_check(self):
         """Local deploys have no URL: an ls/stat/hash/diff observation of the
@@ -104,10 +113,148 @@ class UncoveredClaimTests(unittest.TestCase):
     def test_plain_done_not_flagged(self):
         self.assertEqual(claims.uncovered_claims("Renamed. Done.", []), [])
 
+    def test_dbt_claim_needs_matching_success_summary(self):
+        reply = "dbt build passed."
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, [])[0])
+        covered = [_call("run_command", {"command": "dbt build"}, "b1"),
+                   _out("b1", "Done. PASS=69 WARN=0 ERROR=0 SKIP=0")]
+        self.assertEqual(claims.uncovered_claims(reply, covered), [])
+
+    def test_agy_idless_tool_output_is_a_receipt(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{
+                "name": "run_command", "args": {"CommandLine": "dbt build"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nDone. PASS=69 WARN=0 ERROR=0"},
+        ]
+        self.assertEqual(claims.uncovered_claims("dbt build passed.", steps), [])
+
+    def test_agy_echo_call_does_not_shift_receipt_pairing(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command",
+             "args": {"CommandLine": "echo starting"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nstarting"},
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command",
+             "args": {"CommandLine": "python -m pytest"}}]},
+            {"type": "GENERIC", "content": "Created At: now\n12 passed\nexit=0"},
+        ]
+        self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
+        batch = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "echo starting"}},
+                {"name": "run_command", "args": {"CommandLine": "python -m pytest"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nstarting"},
+            {"type": "GENERIC", "content": "Created At: now\n12 passed\nexit=0"},
+        ]
+        self.assertEqual(claims.uncovered_claims("Tests pass.", batch), [])
+
+    def test_non_dbt_test_and_build_receipts_are_not_pipeline_false_positives(self):
+        test_run = [_call("run_command", {"command": "pytest -q"}, "t1"),
+                    _out("t1", "12 passed\nexit=0")]
+        build_run = [_call("run_command", {"command": "npm run build"}, "b2"),
+                     _out("b2", "Build succeeded\nexit=0")]
+        self.assertEqual(claims.uncovered_claims("The test run passed.", test_run), [])
+        self.assertEqual(claims.uncovered_claims("The build passed.", build_run), [])
+
+    def test_each_pipeline_claim_needs_its_own_kind_of_receipt(self):
+        steps = [_call("run_command", {"command": "dbt build"}, "b1"),
+                 _out("b1", "Done. PASS=69 WARN=0 ERROR=0")]
+        gaps = claims.uncovered_claims("dbt build passed. Row counts match: 120 and 120.", steps)
+        self.assertIn("pipeline/data claim", gaps[0])
+
+    def test_pipeline_run_needs_status_readback_with_run_id(self):
+        reply = "Pipeline run completed."
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, [])[0])
+        no_id = [_call("run_command", {"command": "cloud job status"}, "p1"),
+                 _out("p1", "status: Succeeded")]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, no_id)[0])
+        invalid_id = [_call("run_command", {"command": "cloud job status"}, "p-invalid"),
+                      _out("p-invalid", "status: Succeeded\nvalid: true")]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, invalid_id)[0])
+        covered = [_call("run_command", {"command": "cloud job status"}, "p2"),
+                   _out("p2", "run_id: 123456 status: Succeeded")]
+        self.assertEqual(claims.uncovered_claims(reply, covered), [])
+        json_status = [_call("run_command", {"command": "cloud job status"}, "p3"),
+                       _out("p3", '{"run_id": "123456", "status": "SUCCESS"}')]
+        self.assertEqual(claims.uncovered_claims(reply, json_status), [])
+        cli_status = [_call("run_command", {"command": "gh run view 123"}, "p4"),
+                      _out("p4", "ID: 123\nstatus: completed")]
+        self.assertEqual(claims.uncovered_claims(reply, cli_status), [])
+
+    def test_piped_count_rows_cover_data_reconciliation(self):
+        steps = [_call("run_command", {"command": "select count(*) from source"}, "s1"),
+                 _out("s1", "| 120 |"),
+                 _call("run_command", {"command": "select count(*) from target"}, "s2"),
+                 _out("s2", "| count |\n| --- |\n| 120 |")]
+        self.assertEqual(claims.uncovered_claims("Row counts match.", steps), [])
+
+    def test_compilation_claim_needs_compile_receipt(self):
+        reply = "Compiled clean."
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, [])[0])
+        covered = [_call("run_command", {"command": "dbt compile"}, "c1"),
+                   _out("c1", "Completed successfully\nexit=0")]
+        self.assertEqual(claims.uncovered_claims(reply, covered), [])
+        tsc = [_call("run_command", {"command": "tsc --noEmit"}, "c2"),
+               _out("c2", "exit=0")]
+        self.assertEqual(claims.uncovered_claims(reply, tsc), [])
+
+    def test_row_count_claim_needs_matching_count_query_output(self):
+        reply = "Row counts match: 120 and 120."
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, [])[0])
+        wrong = [_call("run_command", {"command": "select count(*) from source"}, "r1"),
+                 _out("r1", "source_count=120 target_count=119")]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, wrong)[0])
+        covered = [_call("run_command", {"command": "select count(*) from source and target"}, "r2"),
+                   _out("r2", "source_count=120 target_count=120")]
+        self.assertEqual(claims.uncovered_claims(reply, covered), [])
+        separate = [_call("run_command", {"command": "select count(*) from source"}, "r3"),
+                    _out("r3", "source_count=120"),
+                    _call("run_command", {"command": "select count(*) from target"}, "r4"),
+                    _out("r4", "target_count=120")]
+        self.assertEqual(claims.uncovered_claims(reply, separate), [])
+        self.assertEqual(claims.uncovered_claims(
+            "Row counts match: 120 and 120 on v2.", covered), [])
+        metadata_only = [_call("run_command", {"command": "select count(*) from source"}, "r5"),
+                         _out("r5", "Created At: 77 77\nsource_count=120 target_count=119")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Data reconciled.", metadata_only)[0])
+        dated_mismatch = [_call("run_command", {"command": "select count(*) from source and target"}, "r6"),
+                          _out("r6", "2026-10-06 source_count=120\n2026-10-06 target_count=119")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Data reconciled.", dated_mismatch)[0])
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Data reconciled.", [])[0])
+
+    def test_pipeline_claim_ignores_quoted_negated_and_conditional_text(self):
+        for reply in ('The task says "dbt build passed."',
+                      "The task says 'dbt build passed.'",
+                      '"First sentence. dbt build passed."',
+                      'A quoted passage spans lines:\n"First sentence.\ndbt build passed."',
+                      "dbt build did not pass.",
+                      "If all preliminary staging checks for the pipeline succeeded, let me know.",
+                      "If the cloud pipeline completed, then we can publish.",
+                      "Tests pass if the deployment finishes before launch."):
+            with self.subTest(reply=reply):
+                self.assertEqual(claims.uncovered_claims(reply, []), [])
+
+    def test_vietnamese_pipeline_claim_without_receipt(self):
+        gaps = claims.uncovered_claims("Build pass, em đã chạy xong.", [])
+        self.assertTrue(gaps)
+        self.assertIn("pipeline/data claim", gaps[0])
+
+    def test_claim_hint_requires_current_turn_execution_or_edit(self):
+        steps = [{"type": "USER_INPUT", "content": "What does SCD2 mean?"}]
+        self.assertIsNone(claims.claim_contract_hint(
+            "All tests pass and done.", steps, require_action=True))
+        executed = steps + [_call("run_command", {"command": "pytest"}, "q1")]
+        self.assertIsNotNone(claims.claim_contract_hint(
+            "All tests pass and done.", executed, require_action=True))
+
 
 class HintShapeTests(unittest.TestCase):
     def test_hint_matches_compass_shape(self):
-        hint = claims.claim_contract_hint("Done. Tests pass.", [{"type": "USER_INPUT"}])
+        hint = claims.claim_contract_hint("Done. Tests pass.", [
+            {"type": "USER_INPUT"}, _call("run_command", {"command": "pytest"}, "t1")],
+            require_action=True)
         self.assertTrue(hint.startswith("jev_compass not_verified:"), hint)
         self.assertIn("Evidence:", hint)
 
@@ -166,6 +313,18 @@ class NonAssertionTests(unittest.TestCase):
         self.assertEqual(claims.assertion_claims('Script beat 3: "tests pass" → receipt'), [])
         self.assertEqual(claims.assertion_claims("443 test pass, đã deploy."),
                          ["443 test pass, đã deploy."])
+
+    def test_hook_entry_uses_only_current_turn_tool_calls(self):
+        prior = [{"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "Run tests."},
+                 _call("run_command", {"command": "pytest"}, "old"),
+                 {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "What does SCD2 mean?"},
+                 {"type": "PLANNER_RESPONSE", "content": "All tests pass."}]
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as transcript:
+            for step in prior:
+                transcript.write(json.dumps(step) + "\n")
+            transcript.flush()
+            self.assertIsNone(claims.claim_contract_hint_for(
+                "All tests pass.", transcript.name, require_action=True))
 
 
 class RunnerSummaryTests(unittest.TestCase):

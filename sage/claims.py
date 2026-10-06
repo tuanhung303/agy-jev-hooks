@@ -13,12 +13,20 @@ import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from sage.jev.config.catalog import COMPASS_CATEGORIES
-
+from sage.claim_assertions import _claim_sentences, _is_assertion, _sentences
+from sage.pipeline_claims import (
+    BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE, PIPELINE_CLAIM_RE,
+    VIETNAMESE_RUN_CLAIM_RE, has_execution_or_edit, receipt_covers,
+)
 TEST_CLAIM_RE = re.compile(
     r"\btests? (?:pass|passed|are green|all green|run clean)\b|\b\d+ tests? passed\b"
-    r"|\ball tests pass\b|kiểm thử[^.]* (?:đạt|pass)", re.I)
+    r"|\ball tests pass\b|\btest run (?:pass(?:ed)?|succeed(?:ed)?|completed)\b|"
+    r"kiểm thử[^.]* (?:đạt|pass)", re.I)
 DEPLOY_CLAIM_RE = re.compile(
     r"\b(?:deployed|is live|in production|published)\b|đã (?:deploy|lên sóng)", re.I)
+DEPLOY_DESCRIPTION_RE = re.compile(
+    r"\bpublished\s+(?:measures?|reruns?|attempts?|events?|statuses?|records?|rows?|rules?|tables?)\b|"
+    r"\bpublication status\b|\bevaluates?\s+to\s+published\b", re.I)
 VISUAL_CLAIM_RE = re.compile(r"\b(?:screenshot|screen shot)\b|ảnh chụp", re.I)
 # Chỉ claim khi reply gắn ảnh với chứng cứ do chính nó tạo, không phải ảnh
 # người dùng gửi hay ảnh được nhắc tới trong câu chuyện.
@@ -42,28 +50,6 @@ PROBE_CMD_RE = re.compile(r"\b(?:curl|wget|httpie|http|nc|ping|dig|nslookup|open
 STATE_CHECK_RE = re.compile(r"\b(?:ls|stat|shasum|sha\d+sum|md5|diff|cmp)\b", re.I)
 EXIT_LINE_RE = re.compile(r"^\s*exit[=: ]+\d+\s*$", re.I)
 
-# Claims quoted inside a rehearsal (video script, narration, diagram
-# description), fixture transcripts, and hedged statements are not this turn's
-# claims. A suppressed claim is cheaper than a steer on a non-claim.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
-_META_CONTEXT_RE = re.compile(
-    r"\b(?:fixture|synthetic|mock(?:ed|up)?|placeholder|sample|storyboard|script|narration|narrator|"
-    r"frame|frames|beat|beats|scene|shot|slide|video|caption|animation|preview|illustrative|"
-    r"demo|kịch bản|ví dụ|hư cấu|giả lập|minh họa)\b", re.I)
-_DESCRIPTIVE_RE = re.compile(r"→.*→|\b\d+:\d+\s*[-–]\s*\d+:\d+|\bbeat\s*\d|\bhold\s*\d")
-_REPORTED_SPEECH_RE = re.compile(
-    r"\b(?:agent|assistant|model|user)\s+(?:says?|said|claims?|reports?)\b|"
-    r"khi\s+\w+\s+nói\b|\bnói\s+rằng\b", re.I)
-_NEGATION_BEFORE_RE = re.compile(
-    r"\b(?:not|never|cannot|can'?t|won'?t|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|"
-    r"hasn'?t|haven'?t|hadn'?t|no longer|yet to|instead of|rather than|if|unless|whether|"
-    r"suppose|imagine|pretend|would|should|could|might|may|will)\b|"
-    r"\bchưa\b|\bkhông\b|\bsẽ\b|\bnếu\b|\bđừng\b|\bgiả sử\b", re.I)
-_NEGATION_AFTER_RE = re.compile(
-    r"\b(?:may|might|does|do|is|are|was|were|could|would|can|will)\s+not\b|"
-    r"\bnot\s+(?:prove|settle|mean|imply|guarantee|show|confirm|establish|cover|count)\b|"
-    r"\bkhông\s+(?:chắc|hẳn|đủ|rõ)\b|\bchưa\s+(?:chắc|hẳn|đủ|rõ|có)\b", re.I)
-
 # A runner failure summary outranks any exit token, and a pass-count summary
 # counts like exit=0 (piping hides the runner's own status behind the wrapper's).
 # The uppercase token stays case-sensitive: runner logs print "failed" freely.
@@ -74,36 +60,6 @@ _RUN_FAILED_TOKEN_RE = re.compile(r"\bFAILED\b")
 _RUN_PASS_RE = re.compile(
     r"\b\d+\s+(?:passed|passing|tests? pass(?:ed)?)\b|\btests? passed\b|#\s*pass\s+\d+|"
     r"\b\d+\s*/\s*\d+\b|\[\s*100%\s*\]|\bRan \d+ tests?\b|^OK$", re.I | re.M)
-
-
-def _sentences(text: str) -> List[str]:
-    return [s for s in _SENTENCE_SPLIT_RE.split(str(text or "")) if s.strip()]
-
-
-def _is_assertion(sentence: str, match: re.Match, line: str = "") -> bool:
-    """False for rehearsal, reported speech, and hedged or negated phrasing.
-
-    The enclosing line is checked for script shapes (timestamps, node arrows,
-    beats) because a storyboard row carries them outside the sentence.
-    """
-    if _DESCRIPTIVE_RE.search(line or sentence):
-        return False
-    if _META_CONTEXT_RE.search(sentence) or _REPORTED_SPEECH_RE.search(sentence):
-        return False
-    start, end = match.span()
-    before = sentence[max(0, start - 32):start]
-    after = sentence[end:end + 32]
-    return not (_NEGATION_BEFORE_RE.search(before) or _NEGATION_AFTER_RE.search(after))
-
-
-def _claim_sentences(text: str, regex: re.Pattern) -> List[str]:
-    out = []
-    for line in str(text or "").splitlines():
-        for sentence in _sentences(line):
-            match = regex.search(sentence)
-            if match and _is_assertion(sentence, match, line):
-                out.append(sentence.strip())
-    return out
 
 
 def assertion_claims(text: str) -> List[str]:
@@ -153,7 +109,8 @@ def _same_scope(command: str, targets: List[str]) -> bool:
 def _cmd_text(call: Dict[str, Any]) -> str:
     args = call.get("args") or call.get("arguments") or {}
     if isinstance(args, dict):
-        for key in ("command", "Command", "cmd", "Cmd"):
+        for key in ("command", "Command", "cmd", "Cmd", "CommandLine",
+                    "command_line", "commandLine", "script", "Script"):
             if isinstance(args.get(key), str):
                 return args[key]
     return str(args)
@@ -164,21 +121,48 @@ def _cmd_text(call: Dict[str, Any]) -> str:
 ECHO_RE = re.compile(
     r"^\s*(?:echo|printf|python3?\s+(?:-c|-m\s+\w+\s+-c)|node\s+-e|ruby\s+-e|perl\s+-e)\b",
     re.I)
+_AGY_RESULT_RE = re.compile(r"^\s*Created At:", re.I)
 
 
 def _call_output_pairs(steps: List[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any], str]]:
     outputs = {}
+    calls = []
+    positional = {}
+    batch_calls = []
+    batch_outputs = []
+
+    def flush_batch():
+        if (batch_calls and len(batch_calls) == len(batch_outputs)
+                and all(_AGY_RESULT_RE.match(out) for out in batch_outputs)):
+            positional.update((id(call), out) for call, out in zip(batch_calls, batch_outputs))
+
     for step in steps or []:
         if not isinstance(step, dict):
             continue
-        oid = step.get("tool_call_id") or step.get("call_id")
+        step_type = str(step.get("type") or "").upper()
+        if step_type == "PLANNER_RESPONSE":
+            flush_batch()
+            batch_calls, batch_outputs = [], []
+        meta = step.get("metadata") if isinstance(step.get("metadata"), dict) else {}
+        oid = step.get("tool_call_id") or step.get("call_id") or meta.get("tool_call_id") or meta.get("call_id")
         if oid:
             outputs[str(oid)] = str(step.get("content") or "")
-    for step in steps or []:
-        calls = step.get("tool_calls") if isinstance(step, dict) else None
-        for call in calls if isinstance(calls, list) else []:
-            if isinstance(call, dict) and not ECHO_RE.match(_cmd_text(call)):
-                yield call, outputs.get(str(call.get("id") or call.get("tool_call_id") or ""), "")
+        elif step_type == "GENERIC" and batch_calls:
+            batch_outputs.append(str(step.get("content") or ""))
+        tool_calls = step.get("tool_calls")
+        for call in tool_calls if isinstance(tool_calls, list) else []:
+            if not isinstance(call, dict):
+                continue
+            if not (call.get("id") or call.get("tool_call_id") or call.get("call_id")):
+                batch_calls.append(call)
+            if not ECHO_RE.match(_cmd_text(call)):
+                calls.append(call)
+    flush_batch()
+    # AGY omits call/result IDs. Pair only complete per-response batches whose
+    # GENERIC records have the native command-output header.
+    for call in calls:
+        cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
+        yield call, outputs.get(str(cid), "") if cid else positional.get(id(call), "")
 
 
 def _target_state_observed(pairs, targets=()) -> bool:
@@ -221,7 +205,8 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
                 break
         if not covered:
             gaps.append("test claim: no test-run receipt with a passing result")
-    deploy_claims = _claim_sentences(text, DEPLOY_CLAIM_RE)
+    deploy_claims = [s for s in _claim_sentences(text, DEPLOY_CLAIM_RE)
+                     if not DEPLOY_DESCRIPTION_RE.search(s)]
     if deploy_claims:
         paths = [p for sentence in deploy_claims for p in PATH_RE.findall(sentence)]
         hosts = {host_of(u) for sentence in deploy_claims for u in URL_RE.findall(sentence)}
@@ -247,12 +232,19 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
             gaps.append("visual claim: no screenshot receipt")
         elif flags:
             gaps.append(f"visual claim: screenshot shows {', '.join(flags)}")
+    pipeline_claims = []
+    for regex in (DBT_CLAIM_RE, BUILD_CLAIM_RE, PIPELINE_CLAIM_RE, COMPILE_CLAIM_RE,
+                  DATA_CLAIM_RE, VIETNAMESE_RUN_CLAIM_RE):
+        pipeline_claims.extend(_claim_sentences(text, regex))
+    if pipeline_claims and not receipt_covers(pipeline_claims, pairs, _cmd_text, EXIT_OK_RE):
+        gaps.append("pipeline/data claim: no matching run, compile, or count-query receipt")
     return gaps
 
 
-def claim_contract_hint(reply: str, steps: List[Dict[str, Any]]) -> Optional[str]:
+def claim_contract_hint(reply: str, steps: List[Dict[str, Any]],
+                        require_action: bool = False) -> Optional[str]:
     """not_verified steer shaped like the Compass hint; None when covered or unaudited."""
-    if not steps:
+    if not steps or (require_action and not has_execution_or_edit(steps)):
         return None
     gaps = uncovered_claims(reply, steps)
     if not gaps:
@@ -262,11 +254,19 @@ def claim_contract_hint(reply: str, steps: List[Dict[str, Any]]) -> Optional[str
     return f"jev_compass not_verified: {criterion} Evidence: " + "; ".join(gaps)
 
 
-def claim_contract_hint_for(reply: str, transcript_path: str) -> Optional[str]:
+def claim_contract_hint_for(reply: str, transcript_path: str,
+                            require_action: bool = False,
+                            steps: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     """Hook entry: same hint, steps read from a transcript path."""
-    from sage.transcript import _read_transcript_steps
     try:
-        steps = _read_transcript_steps(transcript_path)
+        if steps is None:
+            from sage.transcript import _read_transcript_steps
+            steps = _read_transcript_steps(transcript_path)
+        from sage.transcript import is_explicit_user_input
+        starts = [i for i, step in enumerate(steps) if is_explicit_user_input(step)]
+        if not starts:
+            return None
+        steps = steps[starts[-1]:]
+        return claim_contract_hint(reply, steps, require_action=require_action)
     except Exception:
         return None
-    return claim_contract_hint(reply, steps)
