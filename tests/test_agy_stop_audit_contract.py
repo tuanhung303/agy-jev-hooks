@@ -48,17 +48,23 @@ class HookContractTestCase(unittest.TestCase):
         mode.start()
         self.addCleanup(mode.stop)
 
-    def run_main(self, payload=None, raw_stdin=None):
+    def run_main(self, payload=None, raw_stdin=None, snippets=None):
         """Run hook.main() with canned stdin; return (exit_code, parsed_stdout)."""
         if raw_stdin is None:
             raw_stdin = json.dumps(payload if payload is not None else {})
         stdout = io.StringIO()
+        if snippets is None:
+            snippets = ("prompt text", "reply text", [
+                {"type": "USER_INPUT", "content": "Do the work."},
+                {"type": "PLANNER_RESPONSE", "tool_calls": [
+                    {"name": "run_command", "args": {"command": "true"}}]},
+            ])
         with mock.patch.object(self.hook.sys, "stdin", new=io.StringIO(raw_stdin)), \
                 mock.patch.object(self.hook.sys, "stdout", new=stdout), \
                 mock.patch.object(self.hook, "last_turn_snippets",
-                                  return_value=("prompt text", "reply text")) as snippets:
+                                  return_value=snippets) as snippets_mock:
             code = self.hook.main()
-        self.last = {"snippets": snippets}
+        self.last = {"snippets": snippets_mock}
         out_raw = stdout.getvalue().strip()
         try:
             parsed = json.loads(out_raw) if out_raw else {}
@@ -129,6 +135,22 @@ class GuardTests(HookContractTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out.get("decision"), "continue")
         self.assertIn("no test-run receipt", out.get("reason", ""))
+
+    def test_fail_gate_requires_current_turn_execution_or_edit(self):
+        self.gate_mock.return_value = "FAIL: old failure"
+        steps = [
+            {"type": "USER_INPUT", "content": "Run pytest."},
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"command": "pytest"}}]},
+            {"type": "USER_INPUT", "content": "Explain how to run tests."},
+            {"type": "PLANNER_RESPONSE", "content": "Use pytest from the project directory."},
+        ]
+        code, out = self.run_main(
+            self.payload(), snippets=("Explain how to run tests.",
+                                      "Use pytest from the project directory.", steps))
+        self.assertEqual((code, out), (0, {}))
+        self.gate_mock.assert_not_called()
+        self.assertEqual(self.hook.steer_count(self.payload()["conversationId"]), 0)
 
     def test_invalid_stdin_fails_open(self):
         code, out = self.run_main(raw_stdin="not valid json")

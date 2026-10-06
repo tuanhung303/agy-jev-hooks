@@ -128,6 +128,112 @@ class UncoveredClaimTests(unittest.TestCase):
         ]
         self.assertEqual(claims.uncovered_claims("dbt build passed.", steps), [])
 
+    def test_native_agy_exit_status_covers_compile_and_build(self):
+        compile_ok = [_call("run_command", {"command": "tsc --noEmit"}, "c-native"),
+                      _out("c-native", "Created At: now\nThe command exited with code 0.")]
+        self.assertEqual(claims.uncovered_claims("Compiled clean.", compile_ok), [])
+        build_ok = [_call("run_command", {"command": "npm run build"}, "b-native"),
+                    _out("b-native", "Created At: now\nThe command exited with code 0.\nVite built in 234ms")]
+        self.assertEqual(claims.uncovered_claims("Build passed.", build_ok), [])
+        failed_with_success_text = [
+            _call("run_command", {"command": "npm run build"}, "b-fail"),
+            _out("b-fail", "The command exited with code 1.\nVite built in 234ms")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Build passed.", failed_with_success_text)[0])
+
+    def test_native_nonzero_status_overrides_passing_test_summary(self):
+        failed = [_call("run_command", {"command": "pytest -q"}, "pytest-native-fail"),
+                  _out("pytest-native-fail", "The command exited with code 1.\n12 passed")]
+        self.assertIn("test claim",
+                      claims.uncovered_claims("Tests pass.", failed)[0])
+
+    def test_dbt_assertion_ignores_fenced_examples_escaped_quotes_and_keeps_inline_command(self):
+        # Anonymized f48cc75e-shaped review fixture: source code prints the sentence.
+        fenced = '''The reproducer is:
+```python
+print("Everything is ready. dbt build passed.")
+```'''
+        self.assertEqual(claims.uncovered_claims(fenced, []), [])
+        self.assertEqual(claims.uncovered_claims(
+            r'The fixture prints "The code says \"dbt build passed.\""', []), [])
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("`dbt build` passed.", [])[0])
+
+    def test_delayed_native_results_pair_across_planner_records_and_ambiguous_capture_abstains(self):
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "pytest -q"}}]},
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "npm run build"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 0.\n12 passed"},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 0.\nBuild succeeded"},
+        ]
+        self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
+        ambiguous = steps[:-1]
+        self.assertEqual(claims.uncovered_claims("Tests pass.", ambiguous), [])
+        duplicate_id = [_call("run_command", {"command": "pytest -q"}, "same"),
+                        _call("run_command", {"command": "npm test"}, "same"),
+                        _out("same", "12 passed\nexit=0")]
+        self.assertEqual(claims.uncovered_claims("Tests pass.", duplicate_id), [])
+
+    def test_pipeline_readback_must_match_run_and_terminal_status(self):
+        old_run = [_call("run_command", {"command": "cloud job status old-run"}, "p-old"),
+                   _out("p-old", '{"id":"old-run","status":"Completed"}')]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Pipeline target-run completed.", old_run)[0])
+        failed = [_call("run_command", {"command": "cloud job status"}, "p-failed"),
+                  _out("p-failed", '{"id":"r1","status":"Failed",'
+                       '"message":"last attempt succeeded"}')]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Pipeline run completed.", failed)[0])
+        unrelated_success = [_call("run_command", {"command": "true"}, "v-run"),
+                             _out("v-run", "The command exited with code 0.")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Em đã chạy xong dbt build.", unrelated_success)[0])
+
+    def test_count_reconciliation_requires_equal_labels_or_zero_difference(self):
+        mismatched = [_call("run_command", {"command": "select count(*) as source_count, count(*) as target_count"}, "r-bad"),
+                      _out("r-bad", "source_count=120 target_count=119")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Row counts match: 120 and 119.", mismatched)[0])
+        repeated_source = [_call("run_command", {"command": "select count(*) as source_count, count(*) as target_count"}, "r-repeat"),
+                           _out("r-repeat", "source_count=120\nsource_count=120\ntarget_count=119")]
+        self.assertIn("pipeline/data claim",
+                      claims.uncovered_claims("Row counts match.", repeated_source)[0])
+        zero_difference = [_call("run_command", {"command": "select count(*) difference"}, "r-zero"),
+                           _out("r-zero", "difference=0")]
+        self.assertEqual(claims.uncovered_claims("Row counts match.", zero_difference), [])
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(
+            "Row counts match: 120 and 119.", zero_difference)[0])
+
+    def test_dbt_summary_normalizes_ansi_and_newlines_and_routes_dbt_test(self):
+        ansi_multiline = [_call("run_command", {"command": "dbt build"}, "dbt-ansi"),
+                          _out("dbt-ansi", "Done.\x1b[32m PASS=76 WARN=9\nERROR=0\x1b[0m")]
+        self.assertEqual(claims.uncovered_claims("dbt build passed.", ansi_multiline), [])
+        dbt_test = [_call("run_command", {"command": "dbt test"}, "dbt-test"),
+                    _out("dbt-test", "Done. PASS=76 WARN=9 ERROR=0")]
+        self.assertEqual(claims.uncovered_claims("dbt test passed.", dbt_test), [])
+
+    def test_auditable_wrapped_api_and_sql_file_receipts_are_supported(self):
+        api = [_call("run_command", {"command":
+                       "python3 -c \"import requests; print(requests.get('https://example.com/jobs/instances/example-run').json())\""},
+                     "api-run"),
+               _out("api-run", '{"id":"example-run","status":"Completed"}')]
+        self.assertEqual(claims.uncovered_claims("Pipeline run completed.", api), [])
+        sql = [_call("read_file", {"path": "reconcile.sql"}, "sql-read"),
+               _out("sql-read", "select count(*) as source_count, count(*) as target_count from reconcile_counts"),
+               _call("run_command", {"command": "sqlcmd -i reconcile.sql"}, "sql-run"),
+               _out("sql-run", "source_count target_count\n120 120")]
+        self.assertEqual(claims.uncovered_claims("Row counts match: 120 and 120.", sql), [])
+
+    def test_unrecognized_execution_wrappers_abstain_from_missing_receipt_blocks(self):
+        python = [_call("run_command", {"command": "python3 -c \"custom_client.run()\""}, "python-unknown"),
+                  _out("python-unknown", '{"id":"r1","status":"Completed"}')]
+        self.assertEqual(claims.uncovered_claims("Pipeline run completed.", python), [])
+        sql = [_call("run_command", {"command": "sqlcmd -i reconcile.sql"}, "sql-unknown"),
+               _out("sql-unknown", "source_count target_count\n120 120")]
+        self.assertEqual(claims.uncovered_claims("Row counts match.", sql), [])
+
     def test_agy_echo_call_does_not_shift_receipt_pairing(self):
         steps = [
             {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command",

@@ -48,7 +48,7 @@ def _is_result_step(step: Dict[str, Any]) -> bool:
     return str(step.get("type") or "").upper() not in _NON_RESULT_TYPES
 
 
-def _status_of(step: Dict[str, Any], raw: str) -> str:
+def status_of(step: Dict[str, Any], raw: str) -> str:
     """Explicit tool failure overrides numeric status and textual receipts."""
     sources = (step, step.get("metadata") if isinstance(step.get("metadata"), dict) else {})
     if any(s.get(key) is True for s in sources for key in ("isError", "is_error")):
@@ -60,6 +60,9 @@ def _status_of(step: Dict[str, Any], raw: str) -> str:
                 return str(value)
     match = EXIT_RE.search(raw or "")
     return match.group(1) if match else "unknown"
+
+
+_status_of = status_of
 
 
 def _bind_result_step(

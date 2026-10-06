@@ -79,10 +79,12 @@ except Exception:
         return None
 
 try:
-    from sage.claims import claim_contract_hint_for
+    from sage.claims import claim_contract_hint_for, has_execution_or_edit
 except Exception:
-    def claim_contract_hint_for(reply, transcript_path):
+    def claim_contract_hint_for(reply, transcript_path, **kwargs):
         return None
+    def has_execution_or_edit(steps):
+        return False
 
 try:
     from sage.sanitizer import redact_secrets as _redact_secrets
@@ -161,7 +163,7 @@ def audit_background_claim(payload):
         snippets = last_turn_snippets(transcript_path, include_steps=True)
         if not snippets:
             return
-        turn_steps = snippets[2] if len(snippets) > 2 else None
+        turn_steps = current_turn_steps(snippets[2]) if len(snippets) > 2 else None
         hint = claim_contract_hint_for(snippets[1], transcript_path,
                                        require_action=True, steps=turn_steps)
         action = emit_steer(hint) if hint else None
@@ -180,6 +182,7 @@ def last_turn_snippets(transcript_path, include_steps=False):
     for step in steps:
         if is_explicit_user_input(step):
             prompt = str(step.get("content") or "").strip()
+            reply = ""
         elif step.get("type") == "PLANNER_RESPONSE":
             content = str(step.get("content") or "").strip()
             if content and content != "None":
@@ -188,6 +191,12 @@ def last_turn_snippets(transcript_path, include_steps=False):
         return None
     snippets = (prompt[-SNIPPET_LIMIT:], reply)
     return (*snippets, steps) if include_steps else snippets
+
+
+def current_turn_steps(steps):
+    """Slice transcript evidence once at the latest explicit user turn."""
+    starts = [i for i, step in enumerate(steps or []) if is_explicit_user_input(step)]
+    return steps[starts[-1]:] if starts else []
 
 
 def jev_verifier_hint(prompt, reply, transcript_path=""):
@@ -290,13 +299,14 @@ def main():
         sys.stdout.write(json.dumps({}))
         return 0
     prompt, reply = snippets[:2]
-    turn_steps = snippets[2] if len(snippets) > 2 else None
+    turn_steps = current_turn_steps(snippets[2]) if len(snippets) > 2 else None
 
     # Shadow findings must not mask a later tag configured to block.
     gates = (
         ("CLAIM", lambda: claim_contract_hint_for(
             reply, transcript_path, require_action=True, steps=turn_steps), STEER_TEXT_LIMIT),
-        ("FAIL", lambda: jev_verifier_hint(prompt, reply, transcript_path), STEER_TEXT_LIMIT),
+        ("FAIL", lambda: jev_verifier_hint(prompt, reply, transcript_path)
+         if has_execution_or_edit(turn_steps) else None, STEER_TEXT_LIMIT),
         ("SKILL", lambda: stop_skill_steer(prompt, reply), SKILL_TEXT_LIMIT),
         ("CASUAL", lambda: casual_restyle_hint(reply), STEER_TEXT_LIMIT),
     )

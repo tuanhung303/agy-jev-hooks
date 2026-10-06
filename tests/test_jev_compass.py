@@ -495,6 +495,13 @@ class CompassSupportTests(unittest.TestCase):
                   "artifact_diffs": "<no file mutations>", "final_reply": "Done."}
         self.assertIn("3 failed", label_support("incorrect", blocks))
 
+    def test_earlier_turn_artifact_failure_is_not_current_failure_support(self):
+        blocks = {"command_receipts": "<no commands run>",
+                  "artifact_diffs": "# /tmp/example.txt (write attempts: 1, latest outcome: success) [written in an earlier turn]\n"
+                                    "FAILED example status",
+                  "final_reply": "Use pytest from the project directory."}
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
 
 class CompassTurnModeTests(unittest.TestCase):
     def _classify(self, steps):

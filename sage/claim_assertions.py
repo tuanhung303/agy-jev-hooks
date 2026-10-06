@@ -28,6 +28,14 @@ _CLAIM_NEGATION_RE = re.compile(
 def _quote_state(text: str, active=None, end=None):
     closing = {'“': '”', '‘': '’'}
     for index, char in enumerate(text[:end]):
+        if char in {'"', "'", '`', '“', '‘', '”', '’'}:
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and text[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2:
+                continue
         if char == "'" and index and index + 1 < len(text) and text[index - 1].isalnum() and text[index + 1].isalnum():
             continue
         if active:
@@ -45,7 +53,18 @@ def _quotes_open_at(text: str, end: int, initial=None) -> bool:
 def _sentences(text: str, initial_quote=None) -> List[str]:
     out = []
     active_quote = initial_quote
+    fence = None
     for line in str(text or "").splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)[0]
+            if fence is None:
+                fence = token
+            elif token == fence:
+                fence = None
+            continue
+        if fence:
+            continue
         start = 0
         for index, char in enumerate(line):
             if char in ".!?;" and not _quotes_open_at(line, index + 1, active_quote):
@@ -68,8 +87,12 @@ def _is_assertion(sentence: str, match: re.Match, line: str = "", initial_quote=
     if _META_CONTEXT_RE.search(sentence) or _REPORTED_SPEECH_RE.search(sentence):
         return False
     start, end = match.span()
-    if (_CLAIM_NEGATION_RE.search(match.group(0))
-            or _quotes_open_at(sentence, start, initial_quote)):
+    in_quote = _quotes_open_at(sentence, start, initial_quote)
+    if in_quote and _quote_state(sentence, initial_quote, start) == '`':
+        close = sentence.find('`', start + 1)
+        in_quote = not (close >= 0 and re.search(
+            r"\s+(?:pass(?:ed)?|succeed(?:ed)?|completed|clean)\b", sentence[close + 1:match.end()], re.I))
+    if _CLAIM_NEGATION_RE.search(match.group(0)) or in_quote:
         return False
     before = sentence[:start]
     after = sentence[end:]
@@ -79,7 +102,18 @@ def _is_assertion(sentence: str, match: re.Match, line: str = "", initial_quote=
 def _claim_sentences(text: str, regex: re.Pattern) -> List[str]:
     out = []
     active_quote = None
+    fence = None
     for line in str(text or "").splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)[0]
+            if fence is None:
+                fence = token
+            elif token == fence:
+                fence = None
+            continue
+        if fence:
+            continue
         for sentence in _sentences(line, active_quote):
             match = regex.search(sentence)
             if match and _is_assertion(sentence, match, line, active_quote):

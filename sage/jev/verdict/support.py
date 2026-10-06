@@ -72,10 +72,14 @@ def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
             continue
         code = f" {status.group(0)}" if status else ""
         return f"command_receipts: {bounded(lines[0], 90)}{code} -> {bounded(signal, 120)}"
-    for line in str(blocks.get("artifact_diffs") or "").splitlines():
-        line = line.strip()
-        if line and not line.startswith(("=== ", "# ")) and not _QUOTED_STATUS_RE.search(line) \
-                and _failure_line([line]):
+    earlier_artifact = False
+    for raw_line in str(blocks.get("artifact_diffs") or "").splitlines():
+        if raw_line.startswith("# "):
+            earlier_artifact = "[written in an earlier turn]" in raw_line
+            continue
+        line = raw_line.strip()
+        if (not earlier_artifact and line and not line.startswith("=== ")
+                and not _QUOTED_STATUS_RE.search(line) and _failure_line([line])):
             return f"artifact_diffs: {bounded(line, 160)}"
     return None
 

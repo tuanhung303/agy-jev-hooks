@@ -10,7 +10,7 @@ conditional statements are not claims. Missing kind is an accurate
 not_verified, not a nag. No transcript read: fail open, never guess.
 """
 import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sage.jev.config.catalog import COMPASS_CATEGORIES
 from sage.claim_assertions import _claim_sentences, _is_assertion, _sentences
@@ -18,6 +18,8 @@ from sage.pipeline_claims import (
     BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE, PIPELINE_CLAIM_RE,
     VIETNAMESE_RUN_CLAIM_RE, has_execution_or_edit, receipt_covers,
 )
+from sage.jev.evidence.attribution import status_of
+from sage.claim_receipts import _call_output_pairs, _cmd_text
 TEST_CLAIM_RE = re.compile(
     r"\btests? (?:pass|passed|are green|all green|run clean)\b|\b\d+ tests? passed\b"
     r"|\ball tests pass\b|\btest run (?:pass(?:ed)?|succeed(?:ed)?|completed)\b|"
@@ -39,7 +41,7 @@ COMPLETION_CLAIM_RE = re.compile(
 TEST_CMD_RE = re.compile(
     r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|phpunit|node\s+--test|npm (?:run )?test|"
     r"yarn test|make test|tox|go test|cargo test|ctest)\b", re.I)
-EXIT_OK_RE = re.compile(r"exit[=: ]+0\b")
+EXIT_OK_RE = re.compile(r"exit[=: ]+0\b|exited with code 0\b", re.I)
 URL_RE = re.compile(r"https?://[^\s)\]]+")
 PATH_RE = re.compile(
     r"[\w./~-]+\.(?:py|ts|tsx|js|jsx|mjs|json|ya?ml|toml|sh|sql|md|css|html?)\b", re.I)
@@ -92,7 +94,10 @@ def _run_passed(out: str) -> bool:
     text = str(out or "")
     if _RUN_FAILURE_RE.search(text) or _RUN_FAILED_TOKEN_RE.search(text):
         return False
-    return bool(EXIT_OK_RE.search(text) or _RUN_PASS_RE.search(text))
+    status = status_of({}, text)
+    if status not in ("unknown", "0"):
+        return False
+    return bool(status == "0" or EXIT_OK_RE.search(text) or _RUN_PASS_RE.search(text))
 
 
 def _same_scope(command: str, targets: List[str]) -> bool:
@@ -104,65 +109,6 @@ def _same_scope(command: str, targets: List[str]) -> bool:
         return True
     wanted = {t.split("/")[-1].rsplit(".", 1)[0].lower() for t in targets}
     return any(w and w in m.lower() for w in wanted for m in mentioned)
-
-
-def _cmd_text(call: Dict[str, Any]) -> str:
-    args = call.get("args") or call.get("arguments") or {}
-    if isinstance(args, dict):
-        for key in ("command", "Command", "cmd", "Cmd", "CommandLine",
-                    "command_line", "commandLine", "script", "Script"):
-            if isinstance(args.get(key), str):
-                return args[key]
-    return str(args)
-
-
-# echo/printf/interpreter one-liner chỉ phát lại chữ trong lệnh: tự chứng,
-# không bao giờ là receipt.
-ECHO_RE = re.compile(
-    r"^\s*(?:echo|printf|python3?\s+(?:-c|-m\s+\w+\s+-c)|node\s+-e|ruby\s+-e|perl\s+-e)\b",
-    re.I)
-_AGY_RESULT_RE = re.compile(r"^\s*Created At:", re.I)
-
-
-def _call_output_pairs(steps: List[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any], str]]:
-    outputs = {}
-    calls = []
-    positional = {}
-    batch_calls = []
-    batch_outputs = []
-
-    def flush_batch():
-        if (batch_calls and len(batch_calls) == len(batch_outputs)
-                and all(_AGY_RESULT_RE.match(out) for out in batch_outputs)):
-            positional.update((id(call), out) for call, out in zip(batch_calls, batch_outputs))
-
-    for step in steps or []:
-        if not isinstance(step, dict):
-            continue
-        step_type = str(step.get("type") or "").upper()
-        if step_type == "PLANNER_RESPONSE":
-            flush_batch()
-            batch_calls, batch_outputs = [], []
-        meta = step.get("metadata") if isinstance(step.get("metadata"), dict) else {}
-        oid = step.get("tool_call_id") or step.get("call_id") or meta.get("tool_call_id") or meta.get("call_id")
-        if oid:
-            outputs[str(oid)] = str(step.get("content") or "")
-        elif step_type == "GENERIC" and batch_calls:
-            batch_outputs.append(str(step.get("content") or ""))
-        tool_calls = step.get("tool_calls")
-        for call in tool_calls if isinstance(tool_calls, list) else []:
-            if not isinstance(call, dict):
-                continue
-            if not (call.get("id") or call.get("tool_call_id") or call.get("call_id")):
-                batch_calls.append(call)
-            if not ECHO_RE.match(_cmd_text(call)):
-                calls.append(call)
-    flush_batch()
-    # AGY omits call/result IDs. Pair only complete per-response batches whose
-    # GENERIC records have the native command-output header.
-    for call in calls:
-        cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
-        yield call, outputs.get(str(cid), "") if cid else positional.get(id(call), "")
 
 
 def _target_state_observed(pairs, targets=()) -> bool:
@@ -192,9 +138,10 @@ def _visual_evidence(steps: List[Dict[str, Any]]) -> Optional[Tuple[str, List[st
 def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
     """Gaps between asserted claims and receipts of that kind."""
     text = str(reply or "")
-    pairs = list(_call_output_pairs(steps))
+    pairs, ambiguous = _call_output_pairs(steps)
     gaps: List[str] = []
-    test_claims = _claim_sentences(text, TEST_CLAIM_RE)
+    test_claims = [sentence for sentence in _claim_sentences(text, TEST_CLAIM_RE)
+                   if not re.search(r"\bdbt\s+test\b", sentence, re.I)]
     if test_claims:
         targets = [p for sentence in test_claims for p in PATH_RE.findall(sentence)]
         covered = False
@@ -203,7 +150,7 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
             if TEST_CMD_RE.search(command) and _same_scope(command, targets) and _run_passed(out):
                 covered = True
                 break
-        if not covered:
+        if not covered and not ambiguous:
             gaps.append("test claim: no test-run receipt with a passing result")
     deploy_claims = [s for s in _claim_sentences(text, DEPLOY_CLAIM_RE)
                      if not DEPLOY_DESCRIPTION_RE.search(s)]
@@ -236,7 +183,8 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
     for regex in (DBT_CLAIM_RE, BUILD_CLAIM_RE, PIPELINE_CLAIM_RE, COMPILE_CLAIM_RE,
                   DATA_CLAIM_RE, VIETNAMESE_RUN_CLAIM_RE):
         pipeline_claims.extend(_claim_sentences(text, regex))
-    if pipeline_claims and not receipt_covers(pipeline_claims, pairs, _cmd_text, EXIT_OK_RE):
+    if (pipeline_claims and not receipt_covers(pipeline_claims, pairs, _cmd_text, EXIT_OK_RE)
+            and not ambiguous):
         gaps.append("pipeline/data claim: no matching run, compile, or count-query receipt")
     return gaps
 
@@ -262,11 +210,11 @@ def claim_contract_hint_for(reply: str, transcript_path: str,
         if steps is None:
             from sage.transcript import _read_transcript_steps
             steps = _read_transcript_steps(transcript_path)
-        from sage.transcript import is_explicit_user_input
-        starts = [i for i, step in enumerate(steps) if is_explicit_user_input(step)]
-        if not starts:
-            return None
-        steps = steps[starts[-1]:]
+            from sage.transcript import is_explicit_user_input
+            starts = [i for i, step in enumerate(steps) if is_explicit_user_input(step)]
+            if not starts:
+                return None
+            steps = steps[starts[-1]:]
         return claim_contract_hint(reply, steps, require_action=require_action)
     except Exception:
         return None
