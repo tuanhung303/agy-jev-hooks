@@ -74,6 +74,33 @@ class CompassEvidenceTests(unittest.TestCase):
         self.assertIn("exit=1", blocks["command_receipts"])
         self.assertIn("ready to ship", blocks["final_reply"])
 
+    def test_fail_support_discards_superseded_failure_for_same_command(self):
+        steps = [
+            _step("USER_INPUT", "Run the tests and fix failures."),
+            _step("PLANNER_RESPONSE", "", [_run_call("pytest -q", cid="first")]),
+            _output("The command exited with code 1.\n1 failed", cid="first"),
+            _step("PLANNER_RESPONSE", "", [_run_call("pytest -q", cid="rerun")]),
+            _output("The command exited with code 0.\n12 passed", cid="rerun"),
+            _step("PLANNER_RESPONSE", "Tests pass."),
+        ]
+        blocks = jev_compass.assemble_evidence(steps)
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
+    def test_fail_support_ignores_inherited_content_after_uncaptured_patch(self):
+        steps = [
+            _step("USER_INPUT", "Write the file."),
+            _step("PLANNER_RESPONSE", "", [{"name": "write_to_file", "id": "write",
+                   "args": {"TargetFile": "/tmp/example.txt", "Content": "FAILED example status"}}]),
+            _output("write ok", cid="write"),
+            _step("USER_INPUT", "Patch another line."),
+            _step("PLANNER_RESPONSE", "", [{"name": "replace_file_content", "id": "patch",
+                   "args": {"TargetFile": "/tmp/example.txt", "TargetContent": "unrelated", "ReplacementContent": "updated"}}]),
+            _output("write ok", cid="patch"),
+            _step("PLANNER_RESPONSE", "Updated the file."),
+        ]
+        blocks = jev_compass.assemble_evidence(steps)
+        self.assertIsNone(label_support("claim_conflict", blocks))
+
     def test_trivial_acks_and_short_followups_distilled(self):
         # Multiword instructions remain separate from inert acknowledgments.
         steps = [_step("USER_INPUT", "ok"), _step("USER_INPUT", "lam tiep di")] + SAMPLE_STEPS

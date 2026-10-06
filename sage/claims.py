@@ -16,7 +16,7 @@ from sage.jev.config.catalog import COMPASS_CATEGORIES
 from sage.claim_assertions import _claim_sentences, _is_assertion, _sentences
 from sage.pipeline_claims import (
     BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE, PIPELINE_CLAIM_RE,
-    VIETNAMESE_RUN_CLAIM_RE, has_execution_or_edit, receipt_covers,
+    has_execution_or_edit, receipt_covers,
 )
 from sage.jev.evidence.attribution import status_of
 from sage.claim_receipts import _call_output_pairs, _cmd_text
@@ -89,12 +89,12 @@ def host_of(url: str) -> str:
     return match.group(1).lower() if match else ""
 
 
-def _run_passed(out: str) -> bool:
+def _run_passed(out: str, result_step: Optional[Dict[str, Any]] = None) -> bool:
     """The runner's own result: pass summary or exit=0, never a wrapper's status."""
     text = str(out or "")
     if _RUN_FAILURE_RE.search(text) or _RUN_FAILED_TOKEN_RE.search(text):
         return False
-    status = status_of({}, text)
+    status = status_of(result_step or {}, text)
     if status not in ("unknown", "0"):
         return False
     return bool(status == "0" or EXIT_OK_RE.search(text) or _RUN_PASS_RE.search(text))
@@ -114,7 +114,7 @@ def _same_scope(command: str, targets: List[str]) -> bool:
 def _target_state_observed(pairs, targets=()) -> bool:
     """State-check command với output thật (không chỉ exit line, không phải
     output của chính script deploy)."""
-    for call, out in pairs:
+    for call, out, _result in pairs:
         cmd = str(call.get("args") or call.get("arguments") or "")
         if not STATE_CHECK_RE.search(cmd) or not _same_scope(cmd, list(targets)):
             continue
@@ -145,9 +145,9 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
     if test_claims:
         targets = [p for sentence in test_claims for p in PATH_RE.findall(sentence)]
         covered = False
-        for call, out in pairs:
+        for call, out, result in pairs:
             command = str(call.get("args") or call.get("arguments") or "")
-            if TEST_CMD_RE.search(command) and _same_scope(command, targets) and _run_passed(out):
+            if TEST_CMD_RE.search(command) and _same_scope(command, targets) and _run_passed(out, result):
                 covered = True
                 break
         if not covered and not ambiguous:
@@ -159,7 +159,7 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
         hosts = {host_of(u) for sentence in deploy_claims for u in URL_RE.findall(sentence)}
         hosts.discard("")
         probed = set()
-        for call, out in pairs:
+        for call, out, _result in pairs:
             command = str(call.get("args") or call.get("arguments") or "")
             if PROBE_CMD_RE.search(command):
                 probed |= {host_of(u) for u in URL_RE.findall(f"{command} {out}")}
@@ -181,7 +181,7 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
             gaps.append(f"visual claim: screenshot shows {', '.join(flags)}")
     pipeline_claims = []
     for regex in (DBT_CLAIM_RE, BUILD_CLAIM_RE, PIPELINE_CLAIM_RE, COMPILE_CLAIM_RE,
-                  DATA_CLAIM_RE, VIETNAMESE_RUN_CLAIM_RE):
+                  DATA_CLAIM_RE):
         pipeline_claims.extend(_claim_sentences(text, regex))
     if (pipeline_claims and not receipt_covers(pipeline_claims, pairs, _cmd_text, EXIT_OK_RE)
             and not ambiguous):

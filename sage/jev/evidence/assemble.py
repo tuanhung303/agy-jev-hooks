@@ -196,8 +196,8 @@ def assemble_evidence(steps: List[Dict[str, Any]]) -> Dict[str, str]:
                 else:
                     # Patch-family attempts never overwrite the captured file
                     # content: the resulting file is unknown until re-read.
-                    state["stale"] = True
-                    state["outcome"] = "unknown"
+                    state.update(stale=True, content="<partial patch: replacement text not captured>",
+                                 outcome="unknown")
                     if present:
                         state["patch_note"] = _bound(_redact_field(present, "patch", budget), 200)
                 if raw_output is None or ambiguous:

@@ -234,6 +234,122 @@ print("Everything is ready. dbt build passed.")
                _out("sql-unknown", "source_count target_count\n120 120")]
         self.assertEqual(claims.uncovered_claims("Row counts match.", sql), [])
 
+    def test_sql_count_tables_skip_separators_and_never_count_footers_as_values(self):
+        table = [_call("run_command", {"command": 'sqlcmd -Q "select count(*) as source_count, count(*) as target_count"'}, "sql-table"),
+                 _out("sql-table", "Created At: now\nThe command exited with code 0.\n"
+                      "source_count target_count\n------------ ------------\n120          120\n(1 rows affected)")]
+        self.assertEqual(claims.uncovered_claims("Row counts match: 120 and 120.", table), [])
+        mismatch = [
+            _call("run_command", {"command": "sqlcmd -Q 'select count(*) from source'"}, "source-count"),
+            _out("source-count", "Created At: now\nThe command exited with code 0.\n120\n(1 rows affected)"),
+            _call("run_command", {"command": "sqlcmd -Q 'select count(*) from target'"}, "target-count"),
+            _out("target-count", "Created At: now\nThe command exited with code 0.\n119\n(1 rows affected)"),
+        ]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims("Row counts match.", mismatch)[0])
+
+    def test_native_and_python_dict_status_readbacks_parse_id_and_status_together(self):
+        examples = (
+            ("curl -s https://example.com/jobs/instances/example-run",
+             "Created At: now\nThe command exited with code 0.\n{\"id\":\"example-run\",\"status\":\"Completed\"}"),
+            ("python3 -c \\\"import requests; print(requests.get('https://example.com/jobs/instances/example-run').json())\\\"",
+             "Created At: now\nThe command exited with code 0.\n{'id': 'example-run', 'status': 'Completed'}"),
+        )
+        for command, output in examples:
+            with self.subTest(command=command):
+                steps = [_call("run_command", {"command": command}, "status"), _out("status", output)]
+                self.assertEqual(claims.uncovered_claims("Pipeline example-run completed.", steps), [])
+
+    def test_native_output_header_does_not_hide_status_json(self):
+        output = ("Created At: now\nCompleted At: now\n\nThe command exited with code 0.\n"
+                  "Output:\n{\"id\":\"example-run\",\"status\":\"Completed\"}")
+        steps = [_call("run_command", {"command":
+                   "curl -s https://example.com/jobs/instances/example-run"}, "native-status"),
+                 _out("native-status", output)]
+        self.assertEqual(claims.uncovered_claims("Pipeline example-run completed.", steps), [])
+
+    def test_vietnamese_pytest_completion_uses_test_receipt(self):
+        steps = [_call("run_command", {"command": "pytest -q"}, "vi-pytest"),
+                 _out("vi-pytest", "Created At: now\nThe command exited with code 0.\n12 passed")]
+        self.assertEqual(claims.uncovered_claims("Em đã chạy xong pytest, tests pass.", steps), [])
+
+    def test_vietnamese_dbt_completion_after_action_still_requires_dbt_receipt(self):
+        steps = [_call("run_command", {"command": "true"}, "vi-dbt"),
+                 _out("vi-dbt", "Created At: now\nThe command exited with code 0.")]
+        self.assertTrue(any("pipeline/data claim" in gap for gap in
+                            claims.uncovered_claims("dbt build đã chạy xong.", steps)))
+
+    def test_structured_failure_status_is_preserved_with_receipt(self):
+        failed = [_call("run_command", {"command": "pytest -q"}, "structured-fail"),
+                  {**_out("structured-fail", "12 passed"), "exit_code": 1}]
+        self.assertTrue(any("test claim" in gap for gap in claims.uncovered_claims("Tests pass.", failed)))
+        errored = [_call("run_command", {"command": "pytest -q"}, "structured-error"),
+                   {**_out("structured-error", "12 passed"), "isError": True}]
+        self.assertTrue(any("test claim" in gap for gap in claims.uncovered_claims("Tests pass.", errored)))
+
+    def test_structured_failure_status_invalidates_pipeline_readback(self):
+        failed = [_call("run_command", {"command":
+                   "curl -s https://example.com/jobs/instances/example-run"}, "structured-pipeline"),
+                  {**_out("structured-pipeline", '{"id":"example-run","status":"Completed"}'),
+                   "exit_code": 1}]
+        self.assertTrue(any("pipeline/data claim" in gap for gap in
+                            claims.uncovered_claims("Pipeline example-run completed.", failed)))
+
+    def test_explicit_dbt_failure_is_not_hidden_by_unrelated_unknown_wrapper(self):
+        steps = [
+            _call("run_command", {"command": "dbt build"}, "dbt-failure"),
+            _out("dbt-failure", "Done. PASS=0 ERROR=1\nThe command exited with code 1."),
+            _call("run_command", {"command": "python3 -c \\\"import os; print(os.getcwd())\\\""}, "cwd"),
+            _out("cwd", "/tmp"),
+        ]
+        self.assertTrue(any("pipeline/data claim" in gap
+                            for gap in claims.uncovered_claims("dbt build passed.", steps)))
+
+    def test_zero_error_compiler_summary_is_success_but_positive_errors_fail(self):
+        success = [_call("run_command", {"command": "tsc --noEmit"}, "tsc-zero"),
+                   _out("tsc-zero", "Created At: now\nThe command exited with code 0.\nFound 0 errors.")]
+        self.assertEqual(claims.uncovered_claims("Compiled clean.", success), [])
+        failure = [_call("run_command", {"command": "tsc --noEmit"}, "tsc-errors"),
+                   _out("tsc-errors", "Created At: now\nThe command exited with code 0.\nFound 3 errors.")]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims("Compiled clean.", failure)[0])
+        nonzero_with_zero_errors = [
+            _call("run_command", {"command": "tsc --noEmit"}, "tsc-nonzero-zero-errors"),
+            _out("tsc-nonzero-zero-errors", "Created At: now\nThe command exited with code 1.\nFound 0 errors."),
+        ]
+        self.assertIn("pipeline/data claim", claims.uncovered_claims(
+            "Compiled clean.", nonzero_with_zero_errors)[0])
+
+    def test_idless_results_from_overlapping_planners_are_ambiguous(self):
+        from sage.claim_receipts import _call_output_pairs
+
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "sleep 0.1; true"}}]},
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest -q"}}]},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 1.\n1 failed"},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 0.\n"},
+        ]
+        pairs, ambiguous = _call_output_pairs(steps)
+        self.assertTrue(ambiguous)
+        pytest_pair = next(pair for pair in pairs if "pytest -q" in str(pair[0].get("args")))
+        self.assertNotIn("exited with code 0", pytest_pair[1])
+        self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
+
+    def test_idless_calls_in_one_parallel_planner_batch_are_ambiguous(self):
+        from sage.claim_receipts import _call_output_pairs
+
+        steps = [
+            {"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "sleep 0.1; true"}},
+                {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+            ]},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 1.\n1 failed"},
+            {"type": "GENERIC", "content": "Created At: now\nThe command exited with code 0.\n"},
+        ]
+        pairs, ambiguous = _call_output_pairs(steps)
+        self.assertTrue(ambiguous)
+        pytest_pair = next(pair for pair in pairs if "pytest -q" in str(pair[0].get("args")))
+        self.assertNotIn("exited with code 0", pytest_pair[1])
+        self.assertEqual(claims.uncovered_claims("Tests pass.", steps), [])
+
     def test_agy_echo_call_does_not_shift_receipt_pairing(self):
         steps = [
             {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command",

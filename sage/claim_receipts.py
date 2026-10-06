@@ -49,11 +49,12 @@ def _is_echo_command(command: str) -> bool:
     return False
 
 
-def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], str]], bool]:
+def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], str, Dict[str, Any]]], bool]:
     outputs = {}
     calls = []
     positional = {}
     positional_calls = []
+    positional_call_count = 0
     positional_outputs = []
     duplicate_output_ids = set()
     call_ids = set()
@@ -67,9 +68,9 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
         if oid:
             if str(oid) in outputs:
                 duplicate_output_ids.add(str(oid))
-            outputs[str(oid)] = str(step.get("content") or "")
+            outputs[str(oid)] = step
         elif step_type == "GENERIC":
-            positional_outputs.append(str(step.get("content") or ""))
+            positional_outputs.append(step)
         tool_calls = step.get("tool_calls")
         for call in tool_calls if isinstance(tool_calls, list) else []:
             if not isinstance(call, dict):
@@ -77,6 +78,7 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
             cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
             if not cid:
                 positional_calls.append(call)
+                positional_call_count += 1
             elif str(cid) in call_ids:
                 duplicate_call_ids.add(str(cid))
             else:
@@ -86,14 +88,22 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
     ambiguous = bool(duplicate_output_ids or duplicate_call_ids or (
         positional_calls and positional_outputs and (
             len(positional_calls) != len(positional_outputs)
-            or not all(_AGY_RESULT_RE.match(out) for out in positional_outputs))))
+            or not all(_AGY_RESULT_RE.match(str(out.get("content") or ""))
+                       for out in positional_outputs))))
+    if positional_call_count > 1:
+        # Multiple ID-less calls have no reliable result identity or ordering,
+        # whether they came from one planner response or several.
+        ambiguous = True
     ambiguous_ids = duplicate_output_ids | duplicate_call_ids
-    if positional_calls and len(positional_calls) == len(positional_outputs) \
-            and all(_AGY_RESULT_RE.match(out) for out in positional_outputs):
-        positional.update((id(call), out) for call, out in zip(positional_calls, positional_outputs))
+    if not ambiguous and positional_calls and len(positional_calls) == len(positional_outputs) \
+            and all(_AGY_RESULT_RE.match(str(out.get("content") or ""))
+                    for out in positional_outputs):
+        positional.update((id(call), step) for call, step in zip(positional_calls, positional_outputs))
     pairs = []
     for call in calls:
         cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
-        output = outputs.get(str(cid), "") if cid else positional.get(id(call), "")
-        pairs.append((call, "" if cid and str(cid) in ambiguous_ids else output))
+        result = outputs.get(str(cid)) if cid else positional.get(id(call))
+        if cid and str(cid) in ambiguous_ids:
+            result = None
+        pairs.append((call, str((result or {}).get("content") or ""), result or {}))
     return pairs, ambiguous

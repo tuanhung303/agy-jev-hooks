@@ -1,12 +1,18 @@
 """Receipt checks for pipeline and data completion claims."""
-import json
 import re
 
 from sage.jev.evidence.attribution import status_of
+from sage.pipeline_receipts import (
+    clean as _clean, count_observation as _count_observation,
+    count_scalar_values as _count_scalar_values, run_id as _run_id,
+    terminal_status as _terminal_status,
+)
 
 DBT_CLAIM_RE = re.compile(
     r"\bdbt\s+(?:build|run|test)\b.{0,50}\b(?:pass(?:ed)?|succeed(?:ed)?|completed|clean)\b|"
-    r"\bPASS\s*=\s*\d+[^\n]{0,80}\bERROR\s*=\s*0\b", re.I)
+    r"\bPASS\s*=\s*\d+[^\n]{0,80}\bERROR\s*=\s*0\b|"
+    r"\bđã\s+chạy\s+xong.{0,30}\bdbt\s+(?:build|run|test)\b|"
+    r"\bdbt\s+(?:build|run|test)\b.{0,30}\bđã\s+chạy\s+xong\b", re.I)
 BUILD_CLAIM_RE = re.compile(
     r"\bbuild\s+(?:pass(?:ed)?|succeed(?:ed)?|completed|clean)\b", re.I)
 PIPELINE_CLAIM_RE = re.compile(
@@ -20,64 +26,29 @@ DATA_CLAIM_RE = re.compile(
     r"\b(?:row|record|data)\s+counts?\s+(?:match(?:ed)?|reconciled)\b|"
     r"\b(?:row|record|data)\s+(?:are\s+)?reconciled\b|"
     r"\b(?:reconciled|reconcile[d]?)\s+(?:row|record|data)\s+counts?\b", re.I)
-VIETNAMESE_RUN_CLAIM_RE = re.compile(r"\bđã\s+chạy\s+xong\b", re.I)
-
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _SUCCESS_RE = re.compile(r"\b(?:succeeded|completed successfully|successfully parsed|build succeeded|build completed|build passed|build clean)\b", re.I)
 _FAILURE_RE = re.compile(r"\b(?:failed|failure|error|errors|cancelled|canceled|aborted)\b", re.I)
 _TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
 _TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
 
 
-def _clean(output):
-    return _ANSI_RE.sub("", str(output or ""))
-
-
-def _status_ok(output):
-    status = status_of({}, _clean(output))
+def _status_ok(output, result_step=None):
+    status = status_of(result_step or {}, _clean(output))
     if status != "unknown":
         return status == "0"
     text = re.sub(r"\bERROR\s*=\s*0\b", "", _clean(output), flags=re.I)
     return not _FAILURE_RE.search(text)
 
 
-def _dbt_summary(output):
+def _dbt_summary(output, result_step=None):
     text = _clean(output)
     for match in re.finditer(r"\bDone\.", text, re.I):
         summary = text[match.end():match.end() + 500]
         passed = re.search(r"\bPASS\s*=\s*\d+\b", summary, re.I)
         errors = re.search(r"\bERROR\s*=\s*(\d+)\b", summary, re.I)
         if passed and errors:
-            return int(errors.group(1)) == 0 and _status_ok(text)
+            return int(errors.group(1)) == 0 and _status_ok(text, result_step)
     return False
-
-
-def _terminal_status(output):
-    text = _clean(output)
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict) and isinstance(value.get("status"), str):
-            return value["status"].strip().lower()
-    except (json.JSONDecodeError, TypeError):
-        pass
-    match = re.search(r"\bstatus\s*[:=]\s*[\"']?([\w-]+)", text, re.I)
-    return match.group(1).strip().lower() if match else ""
-
-
-def _run_id(output):
-    text = _clean(output)
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            for key in ("run_id", "execution_id", "executionArn", "id"):
-                if value.get(key) is not None:
-                    return str(value[key]).strip()
-    except (json.JSONDecodeError, TypeError):
-        pass
-    match = re.search(
-        r"[\"']?\b(?:run[_ -]?id|execution[_ -]?id|executionarn|id)\b[\"']?\s*"
-        r"[:=]\s*[\"']?([\w./:-]+)", text, re.I)
-    return match.group(1).strip() if match else ""
 
 
 def _claimed_run_id(sentence):
@@ -88,7 +59,7 @@ def _claimed_run_id(sentence):
 
 
 def _is_status_read(command):
-    return bool(re.search(r"\b(?:status|show|describe|get|list|runs?|jobs?|pipelines?)\b", command, re.I))
+    return bool(re.search(r"\b(?:status|show|view|describe|get|list)\b", command, re.I))
 
 
 def _is_api_read(command):
@@ -99,10 +70,12 @@ def _is_api_read(command):
 
 def _readback_covers(sentence, pairs, command_text):
     wanted_id = _claimed_run_id(sentence)
-    for call, output in pairs:
+    for call, output, _result in pairs:
         command = command_text(call)
         api_read = _is_api_read(command)
         if not (_is_status_read(command) or api_read):
+            continue
+        if not _status_ok(output, _result):
             continue
         status = _terminal_status(output)
         if status in _TERMINAL_FAILURE or status not in _TERMINAL_SUCCESS:
@@ -114,31 +87,12 @@ def _readback_covers(sentence, pairs, command_text):
     return False
 
 
-def _count_observation(output):
-    """Return labelled count observations and an explicit difference value."""
-    text = _clean(output)
-    values = {}
-    difference = None
-    for match in re.finditer(r"\b(source|target|row|record|data)[_\s-]*count\s*[:=|]\s*(\d+)", text, re.I):
-        values[match.group(1).lower()] = int(match.group(2))
-    diff = re.search(r"\b(?:difference|diff|mismatch(?:_count)?)\s*[:=|]\s*(\d+)", text, re.I)
-    if diff:
-        difference = int(diff.group(1))
-    lines = text.splitlines()
-    for index, line in enumerate(lines[:-1]):
-        labels = re.findall(r"\b(source|target)[_\s-]*count\b", line, re.I)
-        numbers = re.findall(r"\b\d+\b", lines[index + 1])
-        if len(labels) >= 2 and len(numbers) >= len(labels):
-            values.update({label.lower(): int(number) for label, number in zip(labels, numbers)})
-    return values, difference
-
-
 def _sql_content_for(command, pairs, command_text):
     path = re.search(r"\bsqlcmd\s+-i\s+([^\s]+)", command, re.I)
     if not path:
         return ""
     wanted = path.group(1).strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
-    for call, output in pairs:
+    for call, output, _result in pairs:
         if str(call.get("name") or "").lower() not in {"read_file", "readfile", "view_file"}:
             continue
         source_path = command_text(call).replace("\\", "/").strip("\"'")
@@ -166,9 +120,9 @@ def _counts_cover(sentence, pairs, command_text):
         return False
     observed = []
     zero_difference = False
-    for call, output in pairs:
+    for call, output, result_step in pairs:
         command = command_text(call)
-        if not _is_count_query(call, pairs, command_text) or not _status_ok(output):
+        if not _is_count_query(call, pairs, command_text) or not _status_ok(output, result_step):
             continue
         labels, difference = _count_observation(output)
         if difference == 0:
@@ -179,18 +133,22 @@ def _counts_cover(sentence, pairs, command_text):
             if labels["source"] != labels["target"]:
                 return False
             observed.append((labels["source"], labels["target"]))
+        elif "source" in labels:
+            observed.append((labels["source"], None))
+        elif "target" in labels:
+            observed.append((None, labels["target"]))
         elif "row" in labels and "record" in labels:
             if labels["row"] != labels["record"]:
                 return False
             observed.append((labels["row"], labels["record"]))
         elif "source" in command.lower():
-            vals = re.findall(r"\b\d+\b", _clean(output))
+            vals = _count_scalar_values(output)
             if vals:
-                observed.append((int(vals[-1]), None))
+                observed.append((int(vals[0]), None))
         elif "target" in command.lower():
-            vals = re.findall(r"\b\d+\b", _clean(output))
+            vals = _count_scalar_values(output)
             if vals:
-                observed.append((None, int(vals[-1])))
+                observed.append((None, int(vals[0])))
     sources = [source for source, _ in observed if source is not None]
     targets = [target for _, target in observed if target is not None]
     pair = (sources[0], targets[0]) if sources and targets else None
@@ -200,8 +158,8 @@ def _counts_cover(sentence, pairs, command_text):
 
 
 def _unauditable_wrapper(pairs):
-    for call, output in pairs:
-        command = str(call.get("args") or call.get("arguments") or "")
+    for call, output, _result in pairs:
+        command = _call_text(call)
         if re.search(r"\b(?:python3?\s+-c|node\s+-e|ruby\s+-e|perl\s+-e)\b", command, re.I) \
                 and not _is_api_read(command):
             if output:
@@ -224,47 +182,77 @@ def _call_text(call):
 
 def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
     """Require matching receipts, or abstain when a wrapper cannot be audited."""
-    if _unauditable_wrapper(pairs):
-        return True
     for sentence in sentences:
+        # Unknown wrappers make absence inconclusive, but never erase an
+        # explicit result for the operation named in this claim.
+        uncertain_wrapper = _unauditable_wrapper(pairs) and not any(
+            _claim_command_match(sentence, command_text(call), pairs)
+            for call, _output, _result in pairs)
         if DBT_CLAIM_RE.search(sentence):
             match = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
             action = match.group(1) if match else None
             if not any((not action or re.search(rf"\bdbt\s+{action}\b", command_text(call), re.I))
                        and re.search(r"\bdbt\s+(?:build|run|test)\b", command_text(call), re.I)
-                       and _dbt_summary(output) for call, output in pairs):
+                       and _dbt_summary(output, result) for call, output, result in pairs):
+                if uncertain_wrapper:
+                    continue
                 return False
         if BUILD_CLAIM_RE.search(sentence) and not DBT_CLAIM_RE.search(sentence):
             if not any(re.search(r"\bbuild\b", command_text(call), re.I)
-                       and _status_ok(output)
-                       and (status_of({}, _clean(output)) == "0" or _SUCCESS_RE.search(_clean(output)))
-                       for call, output in pairs):
+                       and _status_ok(output, result)
+                       and (status_of(result, _clean(output)) == "0" or _SUCCESS_RE.search(_clean(output)))
+                       for call, output, result in pairs):
+                if uncertain_wrapper:
+                    continue
                 return False
         if PIPELINE_CLAIM_RE.search(sentence):
             if re.search(r"\btest\s+run\b", sentence, re.I):
                 continue
             if not _readback_covers(sentence, pairs, command_text):
+                if uncertain_wrapper:
+                    continue
                 return False
         if COMPILE_CLAIM_RE.search(sentence):
             match = re.search(r"\b(?:compiled|compile|parse)\b", sentence, re.I)
             action = "parse" if match and match.group(0).lower() == "parse" else "compile"
-            def compile_receipt(call, output):
+            def compile_receipt(call, output, result):
                 command = command_text(call)
                 valid_command = bool(re.search(rf"\b(?:dbt\s+)?{action}\b|\btsc(?:\s|$)", command, re.I))
-                status = status_of({}, _clean(output))
-                success = status == "0" or (status == "unknown" and _SUCCESS_RE.search(_clean(output)))
-                return valid_command and success and not _FAILURE_RE.search(_clean(output))
-            if not any(compile_receipt(call, output) for call, output in pairs):
+                status = status_of(result, _clean(output))
+                text = _clean(output)
+                count = re.search(r"\b(?:found\s+)?(\d+)\s+errors?\b", text, re.I)
+                positive_errors = bool(count and int(count.group(1)) > 0)
+                zero_errors = bool(count and int(count.group(1)) == 0)
+                success = status == "0" or (status == "unknown" and (
+                    _SUCCESS_RE.search(text) or zero_errors))
+                return valid_command and success and not positive_errors and status not in ("error",)
+            if not any(compile_receipt(call, output, result) for call, output, result in pairs):
+                if uncertain_wrapper:
+                    continue
                 return False
         if DATA_CLAIM_RE.search(sentence) and not _counts_cover(sentence, pairs, command_text):
+            if uncertain_wrapper:
+                continue
             return False
-        if VIETNAMESE_RUN_CLAIM_RE.search(sentence):
-            action = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
-            if not action or not any(
-                re.search(rf"\bdbt\s+{action.group(1)}\b", command_text(call), re.I)
-                and _dbt_summary(output) for call, output in pairs):
-                return False
     return True
+
+
+def _claim_command_match(sentence, command, pairs):
+    """Whether this receipt set has an explicit, auditable command for claim."""
+    if DBT_CLAIM_RE.search(sentence):
+        match = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
+        if match:
+            return bool(re.search(rf"\bdbt\s+{match.group(1)}\b", command, re.I))
+    if BUILD_CLAIM_RE.search(sentence):
+        return bool(re.search(r"\bbuild\b", command, re.I))
+    if COMPILE_CLAIM_RE.search(sentence):
+        return bool(re.search(r"\b(?:compile|parse|tsc)\b", command, re.I))
+    if PIPELINE_CLAIM_RE.search(sentence):
+        return _is_status_read(command) or _is_api_read(command)
+    if DATA_CLAIM_RE.search(sentence):
+        return any(_is_count_query(other_call, pairs, _call_text)
+                   for other_call, _output, _result in pairs if other_call is not None)
+    return False
 
 
 MUTATING_TOOL_NAMES = {

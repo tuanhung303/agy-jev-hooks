@@ -59,7 +59,8 @@ def _failure_line(lines: List[str]) -> str:
 
 def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
     """A receipt that shows an actual failure. A status alone never is one."""
-    for paragraph in _receipt_paragraphs(blocks):
+    paragraphs = _receipt_paragraphs(blocks)
+    for index, paragraph in enumerate(paragraphs):
         lines = _receipt_lines(paragraph)
         if not lines or _NOISE_COMMAND_RE.search(lines[0]):
             continue
@@ -69,6 +70,20 @@ def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
         if not signal and bad_status:
             signal = next((line for line in lines[1:] if _ERROR_KEYWORD_RE.search(line)), "")
         if not signal:
+            continue
+        command = re.sub(r"\s+", " ", lines[0]).strip().casefold()
+        # A later successful rerun of the same captured command supersedes
+        # its earlier failure for current-turn support.
+        superseded = False
+        for later in paragraphs[index + 1:]:
+            later_lines = _receipt_lines(later)
+            if len(later_lines) < 2 or re.sub(r"\s+", " ", later_lines[0]).strip().casefold() != command:
+                continue
+            later_status = _STATUS_RE.search(later_lines[1])
+            if later_status and later_status.group(1).lower() == "0":
+                superseded = True
+                break
+        if superseded:
             continue
         code = f" {status.group(0)}" if status else ""
         return f"command_receipts: {bounded(lines[0], 90)}{code} -> {bounded(signal, 120)}"
