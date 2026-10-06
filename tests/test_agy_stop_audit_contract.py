@@ -320,16 +320,24 @@ class PerTagModeTests(HookContractTestCase):
                 return self.run_main(self.payload(conversationId=f"mode-{tag}-{self._mode_run}"))
         return self.run_main(self.payload(conversationId=f"mode-{tag}-{self._mode_run}"))
 
-    def test_default_blocks_claim_and_fail_but_shadows_skill_and_casual(self):
+    def test_default_shadows_every_tag(self):
         for name in ("AGY_STOP_AUDIT_MODE", "AGY_STOP_AUDIT_BLOCK_TAGS"):
             self.hook.os.environ.pop(name, None)
-        for tag in ("CLAIM", "FAIL"):
+        for tag in ("CLAIM", "FAIL", "SKILL", "CASUAL"):
             with self.subTest(tag=tag):
+                code, out = self._run_hint(tag)
+                self.assertEqual((code, out), (0, {}))
+                self.assertIn(f"WOULD_{tag}", self.hook.LOG_PATH.read_text())
+
+    def test_block_tags_claim_fail_blocks_them_but_shadows_skill_and_casual(self):
+        env = {"AGY_STOP_AUDIT_BLOCK_TAGS": "CLAIM,FAIL", "AGY_STOP_AUDIT_MODE": ""}
+        for tag in ("CLAIM", "FAIL"):
+            with self.subTest(tag=tag), mock.patch.dict(self.hook.os.environ, env):
                 code, out = self._run_hint(tag)
                 self.assertEqual(code, 0)
                 self.assertEqual(out.get("decision"), "continue")
         for tag in ("SKILL", "CASUAL"):
-            with self.subTest(tag=tag):
+            with self.subTest(tag=tag), mock.patch.dict(self.hook.os.environ, env):
                 code, out = self._run_hint(tag)
                 self.assertEqual((code, out), (0, {}))
                 self.assertIn(f"WOULD_{tag}", self.hook.LOG_PATH.read_text())

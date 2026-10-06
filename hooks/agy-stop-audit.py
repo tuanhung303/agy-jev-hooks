@@ -9,9 +9,9 @@ If an audit issue is detected, emits `{"decision": "continue", "reason": "[agy-s
 so the Antigravity language_server re-invokes the agent loop with steering context.
 Otherwise emits `{}` to permit normal termination.
 
-Default policy blocks CLAIM and FAIL; SKILL and CASUAL are shadowed.
+Default policy shadows every tag until natural-traffic precision is measured.
 AGY_STOP_AUDIT_MODE=shadow shadows every tag; AGY_STOP_AUDIT_MODE=block blocks every tag.
-AGY_STOP_AUDIT_BLOCK_TAGS overrides the default tag set.
+AGY_STOP_AUDIT_BLOCK_TAGS lists tags to block, e.g. CLAIM,FAIL.
 
 Safety and Loop Prevention:
 1. fullyIdle check: when subagents or background tasks are running (fullyIdle=False),
@@ -146,7 +146,7 @@ def tag_should_block(tag):
         return False
     if mode == "block":
         return True
-    tags = os.environ.get("AGY_STOP_AUDIT_BLOCK_TAGS", "CLAIM,FAIL")
+    tags = os.environ.get("AGY_STOP_AUDIT_BLOCK_TAGS", "")
     return str(tag).strip().upper() in {part.strip().upper() for part in tags.split(",") if part.strip()}
 
 
