@@ -150,6 +150,12 @@ def run_id(output):
     return _record_id(status_record(output))
 
 
+def has_run_record(output):
+    """The output carries a run record: an ID or name together with a status."""
+    found = records(output) or gh_text_records(output) or [_text_record(output) or {}]
+    return any((_record_id(r) or _keyed(r, _NAME_KEYS)) and _record_status(r) for r in found)
+
+
 _TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
 _TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
 _NOT_FINISHED = {"inprogress", "in_progress", "queued", "running", "notstarted", "pending"}

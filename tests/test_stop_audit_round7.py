@@ -53,6 +53,9 @@ class ScriptLinkTests(unittest.TestCase):
             ("dbt build completed cleanly.", edit() + pair("python3 scripts/gen_models.py", NATIVE_OK + "wrote 4 models")),
             ("Pipeline Workflow_Example completed successfully.",
              pair("python3 trigger_pipeline.py Workflow_Example", NATIVE_OK + "triggered run 5f1c-77aa")),
+            ("Pipeline Workflow_Example completed successfully.",
+             pair("python3 scripts/seed.py", NATIVE_OK + "Seeding completed\nstatus: done")),
+            ("Row counts match.", pair("python3 scripts/refresh_cache.py", NATIVE_OK + "row count cache refreshed")),
         ]
         for reply, steps in cases:
             with self.subTest(reply=reply):

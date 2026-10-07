@@ -11,7 +11,7 @@ from sage.pipeline_counts import (  # noqa: F401  (DATA_CLAIM_RE re-exported)
     sql_content_for as _sql_content_for,
 )
 from sage.pipeline_receipts import (
-    clean as _clean, run_observation as _run_observation, status_body as _status_body,
+    clean as _clean, count_records, has_run_record, run_observation as _run_observation, status_body as _status_body,
 )
 
 DBT_CLAIM_RE = re.compile(
@@ -105,8 +105,11 @@ def operation_linked(sentence, command, output):
     if BUILD_CLAIM_RE.search(sentence):
         return bool(re.search(r"\bbuild\b", text, re.I))
     if PIPELINE_CLAIM_RE.search(sentence):
-        return bool(_RUN_STATUS_TEXT_RE.search(text))
-    return bool(re.search(r"\b(?:count|select|recon\w*|sqlcmd|bq)\b", text, re.I))
+        # Loose status words in a script's own output do not say that it watched a run.
+        return bool(_RUN_STATUS_TEXT_RE.search(command)) or has_run_record(output)
+    found, difference = count_records(output)
+    return bool(re.search(r"\b(?:count|select|recon\w*|sqlcmd|bq)\b", command, re.I)
+                or found or difference is not None)
 
 
 def _unauditable_wrapper(pairs, sentence=""):
