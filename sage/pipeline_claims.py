@@ -1,11 +1,14 @@
 """Receipt checks for pipeline and data completion claims."""
 import re
 
+from sage.claim_receipts import (  # noqa: F401  (has_execution_or_edit re-exported)
+    INSPECTION_RE as _INSPECTION_RE, _cmd_text as _call_text, _program, _stages,
+    has_execution_or_edit,
+)
 from sage.jev.evidence.attribution import status_of
 from sage.pipeline_receipts import (
-    clean as _clean, count_observation as _count_observation,
-    count_scalar_values as _count_scalar_values, run_id as _run_id,
-    terminal_status as _terminal_status,
+    clean as _clean, count_records as _count_records,
+    count_scalar_values as _count_scalar_values, run_observation as _run_observation,
 )
 
 DBT_CLAIM_RE = re.compile(
@@ -28,8 +31,6 @@ DATA_CLAIM_RE = re.compile(
     r"\b(?:reconciled|reconcile[d]?)\s+(?:row|record|data)\s+counts?\b", re.I)
 _SUCCESS_RE = re.compile(r"\b(?:succeeded|completed successfully|successfully parsed|build succeeded|build completed|build passed|build clean)\b", re.I)
 _FAILURE_RE = re.compile(r"\b(?:failed|failure|error|errors|cancelled|canceled|aborted)\b", re.I)
-_TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
-_TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
 _COMPILE_FAILURE_RE = re.compile(
     r"\bCompilation Error\b|\b(?:error|diagnostic)\s+code\s*[:#=]?\s*[1-9]\d*\b|"
     r"\bCould not find (?:ref|model|source)\b", re.I)
@@ -72,22 +73,20 @@ def _is_api_read(command):
 
 
 def _readback_covers(sentence, pairs, command_text):
+    """True on a success record for the claimed run, None when unknown, else False."""
     wanted_id = _claimed_run_id(sentence)
-    for call, output, _result in pairs:
+    unknown = False
+    for call, output, result in pairs:
         command = command_text(call)
-        api_read = _is_api_read(command)
-        if not (_is_status_read(command) or api_read):
+        if not (_is_status_read(command) or _is_api_read(command)):
             continue
-        if not _status_ok(output, _result):
+        if not _status_ok(output, result):
             continue
-        status = _terminal_status(output)
-        if status in _TERMINAL_FAILURE or status not in _TERMINAL_SUCCESS:
-            continue
-        observed_id = _run_id(output)
-        if not observed_id or (wanted_id and observed_id.casefold() != wanted_id.casefold()):
-            continue
-        return True
-    return False
+        observed = _run_observation(output, wanted_id)
+        if observed == "success":
+            return True
+        unknown = unknown or observed == "unknown"
+    return None if unknown else False
 
 
 def _sql_content_for(command, pairs, command_text):
@@ -125,6 +124,7 @@ def _counts_cover(sentence, pairs, command_text):
     zero_difference = False
     count_query_seen = False
     usable_observation = False
+    unassociated = False
     for call, output, result_step in pairs:
         command = command_text(call)
         if not _is_count_query(call, pairs, command_text):
@@ -132,34 +132,45 @@ def _counts_cover(sentence, pairs, command_text):
         count_query_seen = True
         if not _status_ok(output, result_step):
             return False
-        labels, difference = _count_observation(output)
-        usable_observation = usable_observation or bool(labels or difference is not None)
+        found, difference = _count_records(output)
+        if found is None:
+            unassociated = True
+            continue
+        usable_observation = usable_observation or bool(found or difference is not None)
         if difference == 0:
             zero_difference = True
         elif difference is not None:
             return False
-        if "source" in labels and "target" in labels:
-            if labels["source"] != labels["target"]:
+        complete = [r for r in found if ("source" in r and "target" in r)
+                    or ("row" in r and "record" in r)]
+        for record in complete:
+            left, right = (record["source"], record["target"]) if "source" in record \
+                else (record["row"], record["record"])
+            if left != right:
                 return False
-            observed.append((labels["source"], labels["target"]))
-        elif "source" in labels:
-            observed.append((labels["source"], None))
-        elif "target" in labels:
-            observed.append((None, labels["target"]))
-        elif "row" in labels and "record" in labels:
-            if labels["row"] != labels["record"]:
-                return False
-            observed.append((labels["row"], labels["record"]))
-        elif "source" in command.lower():
+            observed.append((left, right))
+        partial = [r for r in found if r not in complete]
+        if len(found) > 1 and partial:
+            # Several records, some one-sided: which sides compare is unknown.
+            unassociated = True
+            continue
+        for record in partial:
+            if "source" in record:
+                observed.append((record["source"], None))
+            elif "target" in record:
+                observed.append((None, record["target"]))
+        if not found and "source" in command.lower():
             vals = _count_scalar_values(output)
             if vals:
                 usable_observation = True
                 observed.append((int(vals[0]), None))
-        elif "target" in command.lower():
+        elif not found and "target" in command.lower():
             vals = _count_scalar_values(output)
             if vals:
                 usable_observation = True
                 observed.append((None, int(vals[0])))
+    if unassociated:
+        return None
     sources = [source for source, _ in observed if source is not None]
     targets = [target for _, target in observed if target is not None]
     pair = (sources[0], targets[0]) if sources and targets else None
@@ -187,25 +198,13 @@ def _unauditable_wrapper(pairs):
     return False
 
 
-def _call_text(call):
-    args = call.get("args") or call.get("arguments") or {}
-    if isinstance(args, dict):
-        for key in ("command", "Command", "cmd", "Cmd", "CommandLine", "command_line",
-                    "commandLine", "script", "Script", "path", "file", "filename"):
-            if isinstance(args.get(key), str):
-                return args[key]
-    return str(args)
-
-
 def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
     """Require matching receipts, or abstain when a wrapper cannot be audited."""
     for sentence in sentences:
         # Unknown wrappers make absence inconclusive, but never erase an
         # explicit result for the operation named in this claim.
         uncertain_wrapper = _unauditable_wrapper(pairs) and not any(
-            _claim_command_match(sentence, command_text(call), pairs)
-            and not re.search(r"\b(?:rg|grep|cat|sed|head|tail|less|more|ls|stat)\b",
-                              command_text(call), re.I)
+            attempts_operation(sentence, command_text(call), pairs)
             for call, _output, _result in pairs)
         if DBT_CLAIM_RE.search(sentence):
             match = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
@@ -227,7 +226,10 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
         if PIPELINE_CLAIM_RE.search(sentence):
             if re.search(r"\btest\s+run\b", sentence, re.I):
                 continue
-            if not _readback_covers(sentence, pairs, command_text):
+            covered = _readback_covers(sentence, pairs, command_text)
+            if covered is None:
+                continue
+            if not covered:
                 if uncertain_wrapper:
                     continue
                 return False
@@ -261,6 +263,13 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
     return True
 
 
+def attempts_operation(sentence, command, pairs):
+    """An executed (non-inspection) shell stage performs the claimed operation."""
+    return any(not _INSPECTION_RE.match(_program(stage))
+               and _claim_command_match(sentence, stage, pairs)
+               for stage in _stages(command))
+
+
 def _claim_command_match(sentence, command, pairs):
     """Whether this receipt set has an explicit, auditable command for claim."""
     if DBT_CLAIM_RE.search(sentence):
@@ -276,21 +285,4 @@ def _claim_command_match(sentence, command, pairs):
     if DATA_CLAIM_RE.search(sentence):
         return any(_is_count_query(other_call, pairs, _call_text)
                    for other_call, _output, _result in pairs if other_call is not None)
-    return False
-
-
-MUTATING_TOOL_NAMES = {
-    "run_command", "bash", "exec", "terminal", "cmd", "command",
-    "write_to_file", "replace_file_content", "multi_replace_file_content",
-    "edit_file", "create_file", "apply_diff", "patch", "modify_file",
-    "write_file", "write", "edit", "multiedit", "notebook_edit", "notebookedit",
-}
-
-
-def has_execution_or_edit(steps) -> bool:
-    for step in steps or []:
-        calls = step.get("tool_calls") if isinstance(step, dict) else None
-        for call in calls if isinstance(calls, list) else []:
-            if isinstance(call, dict) and str(call.get("name") or "").strip().lower() in MUTATING_TOOL_NAMES:
-                return True
     return False

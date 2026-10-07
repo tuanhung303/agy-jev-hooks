@@ -426,8 +426,8 @@ batch_id source_count target_count
         self.assertEqual(terminal_status(output), "")
         steps = [_call("run_command", {"command": "cloud job status target-run"}, "s"),
                  _out("s", "exit=0\n" + output)]
-        self.assertIn("pipeline/data claim", claims.uncovered_claims(
-            "Pipeline target-run completed.", steps)[0])
+        # The target record has no status: unknown, so abstain rather than block.
+        self.assertEqual(claims.uncovered_claims("Pipeline target-run completed.", steps), [])
 
     def test_compile_error_text_overrides_zero_exit_pipe(self):
         steps = [_call("run_command", {"command": "dbt compile | tail -5"}, "c"),

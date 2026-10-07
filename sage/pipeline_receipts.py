@@ -18,110 +18,159 @@ def status_body(output):
     return "\n".join(lines).strip()
 
 
-def status_record(output):
+def _parse_record(text):
+    """One dict or a list of dicts from a JSON or Python literal, else None."""
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            value = parse(text)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            continue
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+            return value
+    return None
+
+
+def records(output):
+    """Structured records, each kept whole; log lines between them are skipped.
+
+    Returns None when the body has no structured record, so callers can fall
+    back to a single plain-text record.
+    """
     body = status_body(output)
     if not body:
-        return {}
-    try:
-        value = json.loads(body)
-        if isinstance(value, dict):
-            return value
-    except (json.JSONDecodeError, TypeError):
-        pass
-    # Multiple JSON records are not one record. Keeping them separate avoids
-    # borrowing an ID from one line and a terminal status from another.
-    records = []
+        return None
+    whole = _parse_record(body)
+    if whole is not None:
+        return whole
+    found = []
     for line in body.splitlines():
-        try:
-            value = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            records = []
-            break
-        if isinstance(value, dict):
-            records.append(value)
-        else:
-            records = []
-            break
-    if len(records) == 1:
-        return records[0]
-    if len(records) > 1:
-        return {}
-    try:
-        value = ast.literal_eval(body)
-        if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-            return value
-    except (SyntaxError, ValueError):
-        pass
-    return {}
+        parsed = _parse_record(line.strip()) if line.strip()[:1] in "{[" else None
+        if parsed is not None:
+            found.extend(parsed)
+    return found or None
+
+
+_STATUS_TEXT_RE = re.compile(r"\bstatus\b[\"']?\s*[:=]\s*[\"']?([\w-]+)", re.I)
+_ID_TEXT_RE = re.compile(
+    r"[\"']?\b(?:run[_ -]?id|execution[_ -]?id|executionarn|id)\b[\"']?\s*[:=]\s*[\"']?([\w./:-]+)", re.I)
+_ID_KEYS = ("run_id", "execution_id", "executionArn", "id")
+
+
+def _text_record(output):
+    """A plain-text body is one record only when it names one status and at most one ID."""
+    body = status_body(output)
+    statuses, ids = _STATUS_TEXT_RE.findall(body), _ID_TEXT_RE.findall(body)
+    if len(statuses) > 1 or len(ids) > 1:
+        return None
+    record = {}
+    if statuses:
+        record["status"] = statuses[0]
+    if ids:
+        record["id"] = ids[0]
+    return record
+
+
+def status_record(output):
+    """The single record of a receipt, or {} when there is not exactly one."""
+    found = records(output)
+    if found is None:
+        return _text_record(output) or {}
+    return found[0] if len(found) == 1 else {}
+
+
+def _record_id(record):
+    for key in _ID_KEYS:
+        if record.get(key) is not None:
+            return str(record[key]).strip()
+    return ""
+
+
+def _record_status(record):
+    value = record.get("status")
+    return value.strip().lower() if isinstance(value, str) else ""
 
 
 def terminal_status(output):
-    value = status_record(output)
-    if isinstance(value.get("status"), str):
-        return value["status"].strip().lower()
-    body = status_body(output)
-    if _multiple_json_records(body):
-        return ""
-    match = re.search(r"\bstatus\b[\"']?\s*[:=]\s*[\"']?([\w-]+)[\"']?", body, re.I)
-    return match.group(1).strip().lower() if match else ""
+    return _record_status(status_record(output))
 
 
 def run_id(output):
-    value = status_record(output)
-    for key in ("run_id", "execution_id", "executionArn", "id"):
-        if value.get(key) is not None:
-            return str(value[key]).strip()
-    body = status_body(output)
-    if _multiple_json_records(body):
-        return ""
-    match = re.search(
-        r"[\"']?\b(?:run[_ -]?id|execution[_ -]?id|executionarn|id)\b[\"']?\s*"
-        r"[:=]\s*[\"']?([\w./:-]+)", body, re.I)
-    return match.group(1).strip() if match else ""
+    return _record_id(status_record(output))
 
 
-def _multiple_json_records(body):
-    records = []
-    for line in str(body or "").splitlines():
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            return False
-        if not isinstance(value, dict):
-            return False
-        records.append(value)
-    return len(records) > 1
+_TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
+_TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
 
 
-def count_observation(output):
-    """Return labelled count observations and an explicit difference value."""
+def run_observation(output, wanted_id=""):
+    """Outcome of the claimed run from records that carry both ID and status.
+
+    "success" or "failure" when the claimed run's own records agree;
+    "unknown" when its records lack a terminal status, disagree, or cannot be
+    associated with one run; "absent" when no record names a run.
+    """
+    found = records(output)
+    if found is None:
+        single = _text_record(output)
+        found = [single] if single is not None else None
+    if found is None:
+        return "unknown"
+    with_id = [r for r in found if _record_id(r)]
+    if wanted_id:
+        mine = [r for r in with_id if _record_id(r).casefold() == wanted_id.casefold()]
+    elif len(with_id) == 1:
+        mine = with_id
+    else:
+        statuses = {_record_status(r) for r in with_id}
+        if with_id and statuses <= _TERMINAL_SUCCESS:
+            return "success"
+        return "unknown" if with_id else "absent"
+    if not mine:
+        return "absent"
+    statuses = {_record_status(r) for r in mine}
+    failed, passed = statuses & _TERMINAL_FAILURE, statuses & _TERMINAL_SUCCESS
+    if failed and not passed:
+        return "failure"
+    if passed and not failed and not (statuses - _TERMINAL_SUCCESS - {""}):
+        return "success"
+    return "unknown"
+
+
+_COUNT_KEYS = {"sourcecount": "source", "targetcount": "target", "rowcount": "row",
+               "recordcount": "record", "datacount": "data"}
+
+
+def count_records(output):
+    """Labelled count records, each from one record, and an explicit difference.
+
+    Structured records and table rows stay separate. Plain-text labels form
+    one record; a label that repeats with different values marks the text as
+    unassociated (None in place of the records list).
+    """
     text = clean(output)
-    values = {}
-    difference = None
-    # Structured lists keep field identity inside each record.
     body = status_body(text)
-    try:
-        structured = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
-        structured = None
-    records = structured if isinstance(structured, list) else [structured]
-    for record in records:
-        if not isinstance(record, dict):
-            continue
+    out = []
+    difference = None
+    for record in records(text) or []:
+        labels = {}
         for key, value in record.items():
-            normalized = re.sub(r"[^a-z]", "", str(key).lower())
-            label = {"sourcecount": "source", "targetcount": "target",
-                     "rowcount": "row", "recordcount": "record",
-                     "datacount": "data"}.get(normalized)
+            label = _COUNT_KEYS.get(re.sub(r"[^a-z]", "", str(key).lower()))
             if label:
                 try:
-                    values[label] = int(value)
+                    labels[label] = int(value)
                 except (TypeError, ValueError):
                     pass
+        if labels:
+            out.append(labels)
+    seen = {}
     for match in re.finditer(r"\b(source|target|row|record|data)[_\s-]*count\s*[:=|]\s*(\d+)", text, re.I):
-        values[match.group(1).lower()] = int(match.group(2))
+        seen.setdefault(match.group(1).lower(), set()).add(int(match.group(2)))
+    if seen:
+        if any(len(values) > 1 for values in seen.values()):
+            return None, difference
+        out.append({label: values.pop() for label, values in seen.items()})
     diff = re.search(r"\b(?:difference|diff|mismatch(?:_count)?)\s*[:=|]\s*(\d+)", text, re.I)
     if diff:
         difference = int(diff.group(1))
@@ -131,7 +180,7 @@ def count_observation(output):
     for index, line in enumerate(lines[:-1]):
         headers = re.findall(r"\S+", line)
         labels = [re.sub(r"[^a-z]", "", h.lower()) for h in headers]
-        if not any(re.fullmatch(r"(?:source|target|row|record|data)count", h) for h in labels):
+        if not any(label in _COUNT_KEYS for label in labels):
             continue
         cursor = index + 1
         while cursor < len(lines) and (not lines[cursor].strip() or
@@ -140,13 +189,13 @@ def count_observation(output):
         row = lines[cursor] if cursor < len(lines) else ""
         cells = re.findall(r"\S+", row)
         if len(cells) >= len(headers) and not re.search(r"rows? affected|rows? returned", row, re.I):
+            row_labels = {}
             for label, cell in zip(labels, cells):
-                if not re.fullmatch(r"(?:source|target|row|record|data)count", label):
-                    continue
                 match = re.fullmatch(r"-?\d+", cell.strip("|"))
-                if match:
-                    key = re.sub(r"count$", "", label)
-                    values[key] = int(match.group(0))
+                if label in _COUNT_KEYS and match:
+                    row_labels[_COUNT_KEYS[label]] = int(match.group(0))
+            if row_labels:
+                out.append(row_labels)
     # A one-column difference table is meaningful only when it has one
     # labelled difference column and a single numeric value below it.
     for index, line in enumerate(lines[:-1]):
@@ -160,7 +209,13 @@ def count_observation(output):
             if match:
                 difference = int(match.group(1))
             break
-    return values, difference
+    return out, difference
+
+
+def count_observation(output):
+    """The single labelled count record and difference ({} unless exactly one record)."""
+    found, difference = count_records(output)
+    return (found[0] if found and len(found) == 1 else {}), difference
 
 
 def count_scalar_values(output):

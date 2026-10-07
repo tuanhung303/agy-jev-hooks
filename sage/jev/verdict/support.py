@@ -36,7 +36,11 @@ _RUNNER_RESULT_RE = re.compile(
     r"\b\d+\s+(?:passed|failed|passing|failing)\b|\bFAILED\b|\bexit=0\b|#\s*(?:pass|fail)\s+\d+", re.I)
 _NOISE_COMMAND_RE = re.compile(
     r"\b(?:tail|head|cat|bat|less|wc)\b[^\n]*\.jsonl|\bUpdated task #\d+ status\b", re.I)
-_DBT_SUMMARY_RE = re.compile(r"\bDone\.[^\n]*\bPASS\s*=\s*\d+[^\n]*\bERROR\s*=\s*(\d+)", re.I)
+_DBT_SUMMARY_RE = re.compile(
+    r"\bDone\.[^\n]{0,200}?\bPASS\s*=\s*\d+[\s\S]{0,200}?\bERROR\s*=\s*(\d+)", re.I)
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+# Counter tokens such as WARN=9 ERROR=0 are summary fields, not failure prose.
+_COUNTER_RE = re.compile(r"\b[A-Za-z_]+\s*=\s*\d+\b")
 
 
 def bounded(text: Any, cap: int) -> str:
@@ -52,9 +56,29 @@ def _failure_line(lines: List[str]) -> str:
     for line in lines:
         if line.startswith(("[", "$ ")) or _PASS_VERDICT_RE.search(line):
             continue
-        if _FAILURE_SUMMARY_RE.search(line) or _FAILED_TOKEN_RE.search(line):
+        text = _COUNTER_RE.sub(" ", line)
+        if _FAILURE_SUMMARY_RE.search(text) or _FAILED_TOKEN_RE.search(text):
             return line
     return ""
+
+
+def _outcome(status: str, lines: List[str]):
+    """One interpretation of a receipt: ("failure", signal), ("success", ""), or ("unknown", "")."""
+    lines = [_ANSI_RE.sub("", line) for line in lines]
+    status = "" if status in ("unknown", "") else status
+    bad_status = bool(status) and status.lower() != "0"
+    summary = _DBT_SUMMARY_RE.search("\n".join(lines))
+    errors = int(summary.group(1)) if summary else None
+    signal = "" if errors == 0 else _failure_line(lines)
+    if not signal and bad_status:
+        signal = next((line for line in lines[1:] if _ERROR_KEYWORD_RE.search(line)), "")
+    if not signal and errors:
+        signal = " ".join(summary.group(0).split())
+    if signal:
+        return "failure", signal
+    if status == "0":
+        return "success", ""
+    return "unknown", ""
 
 
 def _receipt_fields(paragraph: str):
@@ -74,17 +98,45 @@ def _receipt_fields(paragraph: str):
     return "$ " + command, status, lines[status_index + 1:]
 
 
+_LAUNCHER_RE = re.compile(r"^(?:(?:uv|poetry|pipenv|pdm|hatch)\s+run\s+|python3?\s+-m\s+)+")
+_DBT_SCOPE_FLAGS = {"-s", "--select", "-m", "--models", "--exclude", "--selector", "-t", "--target"}
+
+
 def _normalize_command(command: str) -> str:
-    value = re.sub(r"\s+", " ", str(command or "")).strip().casefold()
-    value = re.sub(r"^(?:uv\s+run\s+)+", "", value)
-    value = re.sub(r"^(?:python|python3)\s+-m\s+", "", value)
-    return value
+    value = re.sub(r"\s+", " ", str(command or "")).strip()
+    value = value.removeprefix("$ ").strip().casefold()
+    return _LAUNCHER_RE.sub("", value)
+
+
+def _dbt_scope(command: str):
+    """(action, scope flags) of a dbt command, or None for other commands."""
+    words = _normalize_command(command).split()
+    if len(words) < 2 or words[0] != "dbt":
+        return None
+    scope, index = [], 2
+    while index < len(words):
+        word = words[index]
+        flag, _, inline = word.partition("=")
+        if flag in _DBT_SCOPE_FLAGS:
+            if inline:
+                scope.append((flag, inline))
+            else:
+                values = []
+                while index + 1 < len(words) and not words[index + 1].startswith("-"):
+                    index += 1
+                    values.append(words[index])
+                scope.append((flag, " ".join(values)))
+        index += 1
+    return words[1], tuple(sorted(scope))
 
 
 def _same_runner_scope(left: str, right: str) -> bool:
     a, b = _normalize_command(left), _normalize_command(right)
     if a == b:
         return True
+    dbt_a, dbt_b = _dbt_scope(a), _dbt_scope(b)
+    if dbt_a or dbt_b:
+        return dbt_a == dbt_b
     runner = re.compile(r"\b(pytest|unittest|jest|vitest|mocha|rspec|phpunit|tox|cargo\s+test|go\s+test)\b")
     ma, mb = runner.search(a), runner.search(b)
     return bool(ma and mb and ma.group(1) == mb.group(1)
@@ -126,51 +178,51 @@ def _failing_observation(blocks: Dict[str, str]) -> Optional[str]:
         claims.extend(_claim_sentences(reply, pattern))
     scoped_claim = claims[-1] if claims else ""
     for index, paragraph in enumerate(paragraphs):
-        command, status_value, output_lines = _receipt_fields(paragraph)
-        lines = output_lines
+        command, status_value, lines = _receipt_fields(paragraph)
         if not lines or _NOISE_COMMAND_RE.search(lines[0]):
             continue
-        status = status_value if status_value not in ("unknown", "") else ""
-        bad_status = bool(status) and status.lower() not in ("0", "unknown")
-        dbt_summary = _DBT_SUMMARY_RE.search("\n".join(lines))
-        signal = "" if dbt_summary and int(dbt_summary.group(1)) == 0 else _failure_line(lines)
-        if not signal and bad_status:
-            signal = next((line for line in lines[1:] if _ERROR_KEYWORD_RE.search(line)), "")
-        if not signal and dbt_summary and int(dbt_summary.group(1)) > 0:
-            signal = dbt_summary.group(0)
-        if not signal:
+        outcome, signal = _outcome(status_value, lines)
+        if outcome != "failure":
             continue
-        command_key = _normalize_command(command)
         if scoped_claim and not _claim_matches_command(scoped_claim, command):
             continue
-        # A later successful rerun of the same captured command supersedes
-        # its earlier failure for current-turn support. Runner-equivalent
-        # invocations such as pytest and uv run pytest share a scope.
-        superseded = False
-        for later in paragraphs[index + 1:]:
-            later_command, later_status, later_output = _receipt_fields(later)
-            if not later_command or not (command_key == _normalize_command(later_command)
-                                         or _same_runner_scope(command, later_command)):
-                continue
-            later_summary = _DBT_SUMMARY_RE.search("\n".join(later_output))
-            if later_status.lower() == "0" and not _failure_line(later_output) \
-                    and not (later_summary and int(later_summary.group(1)) > 0):
-                superseded = True
-                break
+        # A later successful rerun of the same operation supersedes its
+        # earlier failure. Launchers (uv run, python -m) do not change it;
+        # a different dbt action or selector does.
+        superseded = any(
+            later_command and _same_runner_scope(command, later_command)
+            and _outcome(later_status, later_output)[0] == "success"
+            for later_command, later_status, later_output in map(_receipt_fields, paragraphs[index + 1:]))
         if superseded:
             continue
+        status = status_value if status_value not in ("unknown", "") else ""
         code = f" [exit={status}]" if status else ""
         return f"command_receipts: {bounded(command, 90)}{code} -> {bounded(signal, 120)}"
     earlier_artifact = False
+    in_scope = True
     for raw_line in str(blocks.get("artifact_diffs") or "").splitlines():
         if raw_line.startswith("# "):
             earlier_artifact = "[written in an earlier turn]" in raw_line
+            in_scope = _artifact_in_scope(scoped_claim, raw_line[2:].split(" (", 1)[0])
             continue
         line = raw_line.strip()
-        if (not earlier_artifact and line and not line.startswith("=== ")
+        if (in_scope and not earlier_artifact and line and not line.startswith("=== ")
                 and not _QUOTED_STATUS_RE.search(line) and _failure_line([line])):
             return f"artifact_diffs: {bounded(line, 160)}"
     return None
+
+
+_OPERATION_CLAIM_RES = (DBT_CLAIM_RE, BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE,
+                        PIPELINE_CLAIM_RE, TEST_CLAIM_RE)
+
+
+def _artifact_in_scope(claim: str, path: str) -> bool:
+    """File content speaks to a claim only when the claim names that file, or
+    the claim is a plain completion statement that names no operation or file."""
+    paths, _urls = claim_targets(claim)
+    if paths:
+        return _same_scope(path, paths)
+    return not any(regex.search(claim) for regex in _OPERATION_CLAIM_RES)
 
 
 def _scoped_gap(claim: str, captured: str) -> Optional[str]:

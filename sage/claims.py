@@ -16,7 +16,7 @@ from sage.jev.config.catalog import COMPASS_CATEGORIES
 from sage.claim_assertions import _claim_sentences, _is_assertion, _sentences
 from sage.pipeline_claims import (
     BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE, PIPELINE_CLAIM_RE,
-    _claim_command_match, has_execution_or_edit, receipt_covers,
+    attempts_operation, has_execution_or_edit, receipt_covers,
 )
 from sage.jev.evidence.attribution import status_of
 from sage.claim_receipts import _call_output_pairs, _cmd_text
@@ -86,7 +86,7 @@ def claim_targets(text: str) -> Tuple[List[str], List[str]]:
 
 def host_of(url: str) -> str:
     match = re.match(r"https?://([^/:]+)", str(url or ""))
-    return match.group(1).lower() if match else ""
+    return match.group(1).lower().rstrip(".") if match else ""
 
 
 def _run_passed(out: str, result_step: Optional[Dict[str, Any]] = None) -> bool:
@@ -169,7 +169,13 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
                 probed |= {host_of(u) for u in URL_RE.findall(f"{command} {out}")}
         probed.discard("")
         url_covered = bool(hosts & probed) if hosts else bool(probed)
-        if not url_covered and not _target_state_observed(pairs, paths):
+        observation_missing = any(
+            result.get("_capture_ambiguous") and (
+                (PROBE_CMD_RE.search(_cmd_text(call)) and (not hosts or hosts & {
+                    host_of(u) for u in URL_RE.findall(_cmd_text(call))}))
+                or (STATE_CHECK_RE.search(_cmd_text(call)) and _same_scope(_cmd_text(call), paths)))
+            for call, _out, result in pairs)
+        if not url_covered and not observation_missing and not _target_state_observed(pairs, paths):
             gaps.append("deploy claim: no target-state receipt "
                         "(URL/status check, or ls/stat/hash of the deployed target)")
     visual_claims = [s for s in _claim_sentences(text, VISUAL_CLAIM_RE)
@@ -186,23 +192,17 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
     pipeline_claims = []
     for regex in (DBT_CLAIM_RE, BUILD_CLAIM_RE, PIPELINE_CLAIM_RE, COMPILE_CLAIM_RE,
                   DATA_CLAIM_RE):
-        pipeline_claims.extend(_claim_sentences(text, regex))
-    uncertain_pipeline = any(
-        result.get("_capture_ambiguous") and any(
-            _claim_operation_match(sentence, _cmd_text(call), pairs)
-            for sentence in pipeline_claims)
-        for call, _out, result in pairs)
-    if pipeline_claims and not receipt_covers(pipeline_claims, pairs, _cmd_text, EXIT_OK_RE) \
-            and not uncertain_pipeline:
-        gaps.append("pipeline/data claim: no matching run, compile, or count-query receipt")
+        pipeline_claims.extend(s for s in _claim_sentences(text, regex) if s not in pipeline_claims)
+    # Each assertion is judged alone: uncertainty about one operation never
+    # erases a captured failure of another.
+    for sentence in pipeline_claims:
+        uncertain = any(result.get("_capture_ambiguous")
+                        and attempts_operation(sentence, _cmd_text(call), pairs)
+                        for call, _out, result in pairs)
+        if not uncertain and not receipt_covers([sentence], pairs, _cmd_text, EXIT_OK_RE):
+            gaps.append("pipeline/data claim: no matching run, compile, or count-query receipt")
+            break
     return gaps
-
-
-def _claim_operation_match(sentence, command, pairs):
-    """Match an attempted operation, excluding read-only inspection commands."""
-    if re.search(r"\b(?:rg|grep|cat|sed|head|tail|less|more|ls|stat)\b", command, re.I):
-        return False
-    return _claim_command_match(sentence, command, pairs)
 
 
 def claim_contract_hint(reply: str, steps: List[Dict[str, Any]],

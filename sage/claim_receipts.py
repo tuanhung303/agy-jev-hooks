@@ -49,87 +49,149 @@ def _is_echo_command(command: str) -> bool:
     return False
 
 
+def _call_id(item: Dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("tool_call_id") or item.get("call_id") or "")
+
+
+def _output_id(step: Dict[str, Any]) -> str:
+    meta = step.get("metadata") if isinstance(step.get("metadata"), dict) else {}
+    return str(step.get("tool_call_id") or step.get("call_id") or meta.get("tool_call_id")
+               or meta.get("call_id") or "")
+
+
 def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], str, Dict[str, Any]]], bool]:
-    outputs = {}
+    """Pair each call with its result; uncertain pairs carry _capture_ambiguous.
+
+    Explicit IDs bind by identity and are never positional candidates. An
+    ID-less native result binds by position only when exactly one call is
+    outstanding. Results that arrive while several ID-less calls are
+    outstanding form an overlap group whose members stay uncertain; serial
+    binding resumes once the group has received one result per member.
+    """
+    outputs: Dict[str, Dict[str, Any]] = {}
+    duplicate_ids = set()
+    seen_call_ids = set()
     calls = []
-    positional = {}
-    duplicate_output_ids = set()
-    call_ids = set()
-    duplicate_call_ids = set()
     for step in steps or []:
         if not isinstance(step, dict):
             continue
-        step_type = str(step.get("type") or "").upper()
-        meta = step.get("metadata") if isinstance(step.get("metadata"), dict) else {}
-        oid = step.get("tool_call_id") or step.get("call_id") or meta.get("tool_call_id") or meta.get("call_id")
+        oid = _output_id(step)
         if oid:
-            if str(oid) in outputs:
-                duplicate_output_ids.add(str(oid))
-            outputs[str(oid)] = step
+            if oid in outputs:
+                duplicate_ids.add(oid)
+            outputs[oid] = step
         tool_calls = step.get("tool_calls")
-        for call in tool_calls if isinstance(tool_calls, list) else []:
-            if not isinstance(call, dict):
+        for item in tool_calls if isinstance(tool_calls, list) else []:
+            if not isinstance(item, dict):
                 continue
-            cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
-            if cid and str(cid) in call_ids:
-                duplicate_call_ids.add(str(cid))
+            cid = _call_id(item)
+            if cid and cid in seen_call_ids:
+                duplicate_ids.add(cid)
             elif cid:
-                call_ids.add(str(cid))
-            if not _is_echo_command(_cmd_text(call)):
-                calls.append(call)
-    ambiguous = bool(duplicate_output_ids or duplicate_call_ids)
-    ambiguous_ids = duplicate_output_ids | duplicate_call_ids
-    # Bind only within a native serial window: one ID-less call followed by
-    # one native result before the next planner response or user turn. If a
-    # later planner starts while an earlier ID-less call is pending, their
-    # windows overlap and positional binding is unsafe.
-    pending = []
-    overlap_active = False
-    for idx, step in enumerate(steps or []):
-        stype = str(step.get("type") or "").upper() if isinstance(step, dict) else ""
-        if stype in {"PLANNER_RESPONSE", "USER_INPUT"}:
-            if stype == "USER_INPUT":
-                overlap_active = False
-            if pending:
-                overlap_active = True
-                ambiguous = True
-                for call in pending:
-                    positional[id(call)] = {"_capture_ambiguous": True}
-                pending = []
-            calls_in_step = step.get("tool_calls") if isinstance(step, dict) else None
-            batch = [c for c in calls_in_step if isinstance(c, dict) and not (
-                c.get("id") or c.get("tool_call_id") or c.get("call_id"))] \
-                if isinstance(calls_in_step, list) else []
-            if len(batch) == 1 and not overlap_active:
-                pending = batch
-            elif len(batch) > 1:
-                ambiguous = True
-                for call in batch:
-                    positional[id(call)] = {"_capture_ambiguous": True}
-                pending = []
-            elif batch and overlap_active:
-                ambiguous = True
-                for call in batch:
-                    positional[id(call)] = {"_capture_ambiguous": True}
-                pending = []
-        elif stype == "GENERIC" and pending:
-            content = str(step.get("content") or "")
-            if _AGY_RESULT_RE.match(content):
-                positional[id(pending[0])] = step
-                pending = []
+                seen_call_ids.add(cid)
+            calls.append(item)
+
+    positional: Dict[int, Dict[str, Any]] = {}
+    tentative: List[Tuple[Dict[str, Any], Dict[str, Any], set]] = []
+    open_idless: List[Dict[str, Any]] = []
+    open_ids: set = set()
+    group: List[Dict[str, Any]] = []
+    group_results = 0
+
+    def mark(items):
+        for item in items:
+            positional[id(item)] = {"_capture_ambiguous": True}
+
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        stype = str(step.get("type") or "").upper()
+        if stype == "USER_INPUT":
+            mark(open_idless + group)
+            open_idless, open_ids, group, group_results = [], set(), [], 0
+            continue
+        oid = _output_id(step)
+        if oid:
+            open_ids.discard(oid)
+        tool_calls = step.get("tool_calls")
+        for item in tool_calls if isinstance(tool_calls, list) else []:
+            if not isinstance(item, dict):
+                continue
+            cid = _call_id(item)
+            if cid:
+                open_ids.add(cid)
+            elif group:
+                group.append(item)
             else:
-                ambiguous = True
-                positional[id(pending[0])] = {"_capture_ambiguous": True}
-                pending = []
-    for call in pending:
-        positional[id(call)] = {"_capture_ambiguous": True}
+                open_idless.append(item)
+        if oid or stype != "GENERIC" or tool_calls:
+            continue
+        # An ID-less result step.
+        if not group and len(open_idless) > 1:
+            group, open_idless, group_results = open_idless, [], 0
+        if group:
+            group_results += 1
+            if group_results >= len(group):
+                mark(group)
+                group, group_results = [], 0
+            continue
+        if not open_idless:
+            continue
+        item = open_idless.pop()
+        if not _AGY_RESULT_RE.match(str(step.get("content") or "")):
+            mark([item])
+        elif open_ids:
+            # An explicit call is still open: the result may be its own.
+            tentative.append((item, step, set(open_ids)))
+        else:
+            positional[id(item)] = step
+    mark(open_idless + group)
+    for item, step, depends in tentative:
+        settled = all(dep in outputs and dep not in duplicate_ids for dep in depends)
+        positional[id(item)] = step if settled else {"_capture_ambiguous": True}
+
     pairs = []
-    for call in calls:
-        cid = call.get("id") or call.get("tool_call_id") or call.get("call_id")
-        result = outputs.get(str(cid)) if cid else positional.get(id(call))
-        if cid and str(cid) in ambiguous_ids:
-            result = None
-        if result is None and cid:
-            result = {"_capture_ambiguous": True}
-        pairs.append((call, str((result or {}).get("content") or ""), result or {}))
+    ambiguous = False
+    for item in calls:
+        cid = _call_id(item)
+        if cid:
+            result = outputs.get(cid) if cid not in duplicate_ids else None
+            if result is None:
+                result = {"_capture_ambiguous": True}
+        else:
+            result = positional.get(id(item)) or {"_capture_ambiguous": True}
+        ambiguous = ambiguous or bool(result.get("_capture_ambiguous"))
+        if _is_echo_command(_cmd_text(item)):
+            continue
+        pairs.append((item, str(result.get("content") or ""), result))
     return pairs, ambiguous
+
+
+INSPECTION_RE = re.compile(r"^(?:rg|grep|egrep|fgrep|cat|sed|awk|head|tail|less|more|ls|stat|wc|find)$", re.I)
+
+
+def _stages(command):
+    """Shell stages of a command line; pipes, lists and newlines split them."""
+    return [part.strip() for part in re.split(r"\|\|?|&&|;|\n", str(command or "")) if part.strip()]
+
+
+def _program(stage):
+    words = re.sub(r"^(?:\w+=\S*\s+)+", "", stage).split()
+    return words[0].rsplit("/", 1)[-1] if words else ""
+
+
+MUTATING_TOOL_NAMES = {
+    "run_command", "bash", "exec", "terminal", "cmd", "command",
+    "write_to_file", "replace_file_content", "multi_replace_file_content",
+    "edit_file", "create_file", "apply_diff", "patch", "modify_file",
+    "write_file", "write", "edit", "multiedit", "notebook_edit", "notebookedit",
+}
+
+
+def has_execution_or_edit(steps) -> bool:
+    for step in steps or []:
+        calls = step.get("tool_calls") if isinstance(step, dict) else None
+        for call in calls if isinstance(calls, list) else []:
+            if isinstance(call, dict) and str(call.get("name") or "").strip().lower() in MUTATING_TOOL_NAMES:
+                return True
+    return False
