@@ -164,8 +164,9 @@ def audit_background_claim(payload):
         if not snippets:
             return
         turn_steps = current_turn_steps(snippets[2]) if len(snippets) > 2 else None
-        hint = claim_contract_hint_for(snippets[1], transcript_path,
-                                       require_action=True, steps=turn_steps)
+        prior_steps = prior_turn_steps(snippets[2]) if len(snippets) > 2 else None
+        hint = claim_contract_hint_for(snippets[1], transcript_path, require_action=True,
+                                       steps=turn_steps, prior_steps=prior_steps)
         action = emit_steer(hint) if hint else None
         if action:
             log(f"WOULD_CLAIM_BG session={session_id}: {action}")
@@ -197,6 +198,12 @@ def current_turn_steps(steps):
     """Slice transcript evidence once at the latest explicit user turn."""
     starts = [i for i, step in enumerate(steps or []) if is_explicit_user_input(step)]
     return steps[starts[-1]:] if starts else []
+
+
+def prior_turn_steps(steps):
+    """The session's earlier turns, for claims that restate an earlier result."""
+    starts = [i for i, step in enumerate(steps or []) if is_explicit_user_input(step)]
+    return steps[:starts[-1]] if starts else []
 
 
 def jev_verifier_hint(prompt, reply, transcript_path=""):
@@ -300,11 +307,13 @@ def main():
         return 0
     prompt, reply = snippets[:2]
     turn_steps = current_turn_steps(snippets[2]) if len(snippets) > 2 else None
+    prior_steps = prior_turn_steps(snippets[2]) if len(snippets) > 2 else None
 
     # Shadow findings must not mask a later tag configured to block.
     gates = (
         ("CLAIM", lambda: claim_contract_hint_for(
-            reply, transcript_path, require_action=True, steps=turn_steps), STEER_TEXT_LIMIT),
+            reply, transcript_path, require_action=True, steps=turn_steps,
+            prior_steps=prior_steps), STEER_TEXT_LIMIT),
         ("FAIL", lambda: jev_verifier_hint(prompt, reply, transcript_path)
          if has_execution_or_edit(turn_steps) else None, STEER_TEXT_LIMIT),
         ("SKILL", lambda: stop_skill_steer(prompt, reply), SKILL_TEXT_LIMIT),

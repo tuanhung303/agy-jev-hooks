@@ -6,21 +6,26 @@ _META_CONTEXT_RE = re.compile(
     r"\b(?:fixture|synthetic|mock(?:ed|up)?|placeholder|sample|storyboard|script|narration|narrator|"
     r"frame|frames|beat|beats|scene|shot|slide|video|caption|animation|preview|illustrative|"
     r"demo|kịch bản|ví dụ|hư cấu|giả lập|minh họa)\b", re.I)
-_DESCRIPTIVE_RE = re.compile(r"→.*→|\b\d+:\d+\s*[-–]\s*\d+:\d+|\bbeat\s*\d|\bhold\s*\d")
+_DESCRIPTIVE_RE = re.compile(
+    r"→.*→|\b\d+:\d+\s*[-–]\s*\d+:\d+|\bbeat\s*\d|\bhold\s*\d|"
+    r"\b\d+\s*(?:đến|to|–|-)\s*\d+\s*(?:giây|seconds?|secs?)\b", re.I)
 _REPORTED_SPEECH_RE = re.compile(
     r"\b(?:agent|assistant|model|user)\s+(?:says?|said|claims?|reports?)\b|"
     r"khi\s+\w+\s+nói\b|\bnói\s+rằng\b", re.I)
 _NEGATION_BEFORE_RE = re.compile(
     r"\b(?:not|never|cannot|can'?t|won'?t|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|"
     r"hasn'?t|haven'?t|hadn'?t|no longer|yet to|instead of|rather than|if|unless|whether|"
-    r"suppose|imagine|pretend|would|should|could|might|may|will|must|can|ought to|"
-    r"needs? to|has to|have to)\b|"
+    r"suppose|imagine|pretend|would|should|could|might|may|will|you can|you(?:'ll| will) need to|"
+    r"(?:must|can|ought to|needs? to|has to|have to) be)\b|"
     r"\bchưa\b|\bkhông\b|\bsẽ\b|\bnếu\b|\bđừng\b|\bgiả sử\b", re.I)
 _NEGATION_AFTER_RE = re.compile(
     r"\b(?:may|might|does|do|is|are|was|were|could|would|can|will)\s+not\b|"
     r"\bnot\s+(?:pass|passed|succeed|succeeded|prove|settle|mean|imply|guarantee|show|confirm|establish|cover|count)\b|"
     r"\bkhông\s+(?:chắc|hẳn|đủ|rõ)\b|\bchưa\s+(?:chắc|hẳn|đủ|rõ|có)\b|"
     r"\b(?:if|unless|provided that|assuming)\b", re.I)
+# A plan item ("Fixing X so tests pass") states a purpose, not a result.
+_PURPOSE_RE = re.compile(
+    r"^\W*(?!(?:every|no|some|any)thing\b)[A-Za-z]{2,}ing\b.*\bso\b", re.I)
 _CLAIM_NEGATION_RE = re.compile(
     r"\b(?:not|never|cannot|can't|won't|don't|didn't|if|unless|whether)\b|"
     r"\b(?:chưa|không|nếu|sẽ)\b", re.I)
@@ -97,7 +102,8 @@ def _is_assertion(sentence: str, match: re.Match, line: str = "", initial_quote=
         return False
     before = sentence[:start]
     after = sentence[end:]
-    return not (_NEGATION_BEFORE_RE.search(before) or _NEGATION_AFTER_RE.search(after))
+    return not (_NEGATION_BEFORE_RE.search(before) or _NEGATION_AFTER_RE.search(after)
+                or _PURPOSE_RE.search(before))
 
 
 def _claim_sentences(text: str, regex: re.Pattern) -> List[str]:

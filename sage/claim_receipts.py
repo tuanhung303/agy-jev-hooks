@@ -7,9 +7,17 @@ from typing import Any, Dict, List, Tuple
 _ECHO_RE = re.compile(r"^\s*(?:echo|printf)\b", re.I)
 _AGY_RESULT_RE = re.compile(r"^\s*Created At:", re.I)
 _BACKGROUND_RE = re.compile(r"Tool is running as a background task with task id:\s*(\S+)", re.I)
-_EXIT_CODE_RE = re.compile(r"exited with code \d+|exit[=: ]+\d+", re.I)
+_EXIT_CODE_RE = re.compile(
+    r"exited with code \d+|exit[=: ]+\d+|The command (?:completed successfully|failed with exit code)", re.I)
 _EXPLICIT_FAILURE_RE = re.compile(
-    r"#\s*fail\s+[1-9]|\b[1-9]\d*\s+(?:failed|failing)\b|\bERROR\s*=\s*[1-9]", re.I)
+    r"#\s*fail\s+[1-9]|\b[1-9]\d*\s+(?:failed|failing)\b|\bERROR\s*=\s*[1-9]|\bTraceback\b|"
+    r"\bnpm ERR!", re.I)
+_UNFINISHED = {"RUNNING", "PENDING", "QUEUED", "STARTING"}
+# Older agy transcripts type each result step by tool and word the exit status.
+_NOT_RESULT_TYPES = {"PLANNER_RESPONSE", "USER_INPUT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE",
+                     "CHECKPOINT", "CONVERSATION_HISTORY"}
+_WORDED_EXIT_RE = re.compile(
+    r"^\s*The command (?:completed successfully|failed with exit code:?\s*(\d+))\.?\s*$", re.I | re.M)
 
 
 def _cmd_text(call: Dict[str, Any]) -> str:
@@ -67,32 +75,55 @@ def _background_result(steps, start, task_id):
     """The completion record of a background task, or an uncertain capture.
 
     A native background launch returns only a task handle. Its outcome comes
-    later, from a `Task id ... finished with result` system message or a
-    `manage_task` status read with `Status: DONE` for the same task ID.
+    later, from a `Task id ... finished with result` system message or the
+    latest `manage_task` status read for the same task ID. The model's own
+    replies are never task records. A task whose latest read is still
+    running has not completed, which contradicts a completion claim.
     """
-    finished, status_done = "", ""
+    finished, latest, quoted = "", None, False
     escaped = re.escape(task_id)
     for step in steps[start + 1:]:
-        if not isinstance(step, dict):
-            continue
-        text = str(step.get("content") or "")
+        text = str(step.get("content") or "") if isinstance(step, dict) else ""
         if task_id not in text:
+            continue
+        if str(step.get("type") or "").upper() == "PLANNER_RESPONSE":
+            quoted = quoted or bool(re.search(rf"Task id \"?{escaped}\"? finished", text))
             continue
         match = re.search(rf"Task id \"?{escaped}\"? finished with result:?(.*)", text, re.S)
         if match:
             finished = match.group(1).split("</SYSTEM_MESSAGE>")[0].strip()
             continue
-        if re.search(rf"^Task:\s*{escaped}\s*$", text, re.M) and re.search(r"^Status:\s*DONE\b", text, re.M):
-            status_done = text
+        state = re.search(r"^Status:\s*(\w+)", text, re.M)
+        if re.search(rf"^Task:\s*{escaped}\s*$", text, re.M) and state:
+            latest = (state.group(1).upper(), text)
+    if not finished and latest and latest[0] in _UNFINISHED:
+        return {"content": latest[1], "_background_task": task_id, "isError": True, "_unfinished": True}
+    status_done = latest[1] if latest and latest[0] == "DONE" else ""
     content = "\n".join(part for part in (finished, status_done) if part)
     if not content:
+        if quoted:  # the model quotes a completion record the transcript never received
+            return {"content": "", "_background_task": task_id, "_self_reported": True}
         return {"_capture_ambiguous": True, "_background_task": task_id}
     result = {"content": content, "_background_task": task_id}
-    if not _EXIT_CODE_RE.search(content) and not _EXPLICIT_FAILURE_RE.search(content):
+    if not _EXIT_CODE_RE.search(content) and not _EXPLICIT_FAILURE_RE.search(content) \
+            and not re.search(r"\bFAILED\b", content):
         # A DONE status without an exit code proves completion, not outcome:
         # a pass summary can still cover, but absence of one is not a gap.
         result["_capture_ambiguous"] = True
     return result
+
+
+def _is_result_step(stype, step) -> bool:
+    return stype == "GENERIC" or (
+        stype not in _NOT_RESULT_TYPES and bool(_AGY_RESULT_RE.match(str(step.get("content") or ""))))
+
+
+def _with_worded_exit(result):
+    """`The command failed with exit code: 2` carries the same status as a numeric exit line."""
+    match = _WORDED_EXIT_RE.search(str(result.get("content") or ""))
+    if not match or any(key in result for key in ("exit_code", "returncode", "exitCode", "ExitCode")):
+        return result
+    return {**result, "exit_code": int(match.group(1) or 0)}
 
 
 def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], str, Dict[str, Any]]], bool]:
@@ -160,7 +191,7 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
                 group.append(item)
             else:
                 open_idless.append(item)
-        if oid or stype != "GENERIC" or tool_calls:
+        if oid or tool_calls or not _is_result_step(stype, step):
             continue
         # An ID-less result step.
         if not group and len(open_idless) > 1:
@@ -200,6 +231,7 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
         background = _BACKGROUND_RE.search(str(result.get("content") or ""))
         if background and id(result) in position:
             result = _background_result(steps, position[id(result)], background.group(1))
+        result = _with_worded_exit(result)
         ambiguous = ambiguous or bool(result.get("_capture_ambiguous"))
         if _is_echo_command(_cmd_text(item)):
             continue

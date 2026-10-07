@@ -62,8 +62,9 @@ class BackgroundTaskTests(unittest.TestCase):
 
     def test_unfinished_background_task_abstains(self):
         self.assertEqual(gaps("Tests pass.", background("pytest -q")), [])
+        # Review 6: a latest RUNNING read is not completion, so it contradicts the claim.
         running = out(STATUS_DONE.format(log="....").replace("Status: DONE", "Status: RUNNING"))
-        self.assertEqual(gaps("Tests pass.", background("pytest -q", running)), [])
+        self.assertIn("test claim", gaps("Tests pass.", background("pytest -q", running))[0])
 
     def test_failed_background_task_still_blocks(self):
         steps = background("pytest -q", out(FINISHED.format(

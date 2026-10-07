@@ -14,7 +14,8 @@ def status_body(output):
     text = clean(output)
     lines = [line for line in text.splitlines()
              if not re.match(r"^\s*(?:Created At:|Completed At:|Output:|Stdout:|Stderr:|"
-                             r"The command exited with code \d+|exit[=: ]+\d+)\s*", line, re.I)]
+                             r"The command (?:exited with code \d+|completed successfully|failed with exit code:?\s*\d+)|"
+                             r"exit[=: ]+\d+)\s*", line, re.I)]
     return "\n".join(lines).strip()
 
 
@@ -99,9 +100,46 @@ def _names_run(record, wanted):
     return _record_id(record).casefold() == wanted or _keyed(record, _NAME_KEYS).casefold() == wanted
 
 
+_CONCLUSION_FAILURE = {"failure", "cancelled", "canceled", "timedout", "actionrequired", "startupfailure"}
+
+
 def _record_status(record):
-    value = record.get("status")
-    return value.strip().lower() if isinstance(value, str) else ""
+    """Status of one record; a CI conclusion, when present, decides the outcome."""
+    conclusion = _keyed(record, ("conclusion",)).lower().replace("_", "")
+    if conclusion:
+        return "succeeded" if conclusion == "success" else (
+            "failed" if conclusion in _CONCLUSION_FAILURE else conclusion)
+    value = _keyed(record, ("status",))
+    return value.lower()
+
+
+_GH_HEADER_RE = re.compile(r"^([\u2713X\u2717*])\s+\S.*\u00b7\s*(\d{5,})\s*$", re.M)
+_GH_LIST_RE = re.compile(
+    r"^(completed|in_progress|queued|requested|waiting|pending)\t(\w*)\t.*\t(\d{5,})\t", re.M)
+_GH_DONE_RE = re.compile(r"\((\d{5,})\) completed with '(\w+)'")
+
+
+def gh_text_records(output):
+    """Run records from `gh run list|watch|view` text output, newest watch header last."""
+    text = clean(output)
+    found = [{"id": m.group(3), "status": m.group(1), "conclusion": m.group(2)}
+             for m in _GH_LIST_RE.finditer(text)]
+    headers = list(_GH_HEADER_RE.finditer(text))
+    if headers:
+        mark = headers[-1].group(1)
+        state = "succeeded" if mark == "\u2713" else ("in_progress" if mark == "*" else "failed")
+        tail = text[headers[-1].end():]
+        # gh prints ANNOTATIONS only once the run has finished; a truncated
+        # capture can hide the final header but keep the finished job steps.
+        if state == "in_progress" and re.search(r"^ANNOTATIONS\s*$", tail, re.M):
+            if re.search(r"^\s*[X\u2717]\s", tail, re.M):
+                state = "failed"
+            elif re.search(r"^\s*\u2713 Complete job\s*$", tail, re.M):
+                state = "succeeded"
+        found.append({"id": headers[-1].group(2), "status": state})
+    found.extend({"id": m.group(1), "status": "completed", "conclusion": m.group(2)}
+                 for m in _GH_DONE_RE.finditer(text))
+    return found
 
 
 def terminal_status(output):
@@ -124,7 +162,7 @@ def run_observation(output, wanted_id=""):
     "unknown" when its records lack a terminal status, disagree, or cannot be
     associated with one run; "absent" when no record names a run.
     """
-    found = records(output)
+    found = records(output) or gh_text_records(output) or None
     if found is None:
         single = _text_record(output)
         found = [single] if single is not None else None
