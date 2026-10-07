@@ -15,6 +15,7 @@ from sage.claim_receipts import SCRIPT_RE, _cmd_text, is_execution
 from sage.jev.evidence.attribution import status_of
 from sage.pipeline_claims import _status_ok, receipt_covers
 from sage.pipeline_receipts import run_observation
+from sage.run_logs import dbt_results_passed, transfer_targets
 
 TEST_CMD_RE = re.compile(
     r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|phpunit|node\s+--test|npm (?:run )?test|"
@@ -116,12 +117,22 @@ def _test_gap(test_claims, pairs) -> Tuple[bool, bool]:
             attempted = True
             covered = covered or _run_passed(out, result)
     if not covered:
-        covered = any(named_check_passed(s, pairs, _run_passed) for s in test_claims)
+        covered = any(named_check_passed(s, pairs, _run_passed) for s in test_claims) or any(
+            is_execution(call) and dbt_results_passed(_cmd_text(call), out) for call, out, _r in pairs) \
+            or _count_matched(test_claims, pairs)
     uncertain = any(is_execution(call) and TEST_CMD_RE.search(_cmd_text(call))
                     and _same_scope(_cmd_text(call), targets) and result.get("_capture_ambiguous")
                     for call, _out, result in pairs) or any(
         _unclassified_test_wrapper(call, out, result, targets) for call, out, result in pairs)
     return covered or uncertain, attempted or uncertain
+
+
+def _transfer_logged(call, out, result, paths) -> bool:
+    """A clean object-store transfer log that names where it wrote; a claimed path must appear."""
+    if not is_execution(call) or not transfer_targets(out) or not _status_ok(out, result):
+        return False
+    text = f"{_cmd_text(call)}\n{out}"
+    return not paths or any(p.rsplit("/", 1)[-1] in text for p in paths)
 
 
 def _deploy_gap(deploy_claims, pairs) -> Tuple[bool, bool]:
@@ -138,7 +149,7 @@ def _deploy_gap(deploy_claims, pairs) -> Tuple[bool, bool]:
     url_covered = bool(hosts & probed) if hosts else bool(probed)
     pull_request = any(re.search(r"\b(?:PR|pull request)\b", s) for s in deploy_claims)
     observed = not hosts and any(
-        verify_script_passed(call, out, result, _status_ok) or (
+        verify_script_passed(call, out, result, _status_ok) or _transfer_logged(call, out, result, paths) or (
             is_execution(call) and re.search(r"\bgh\s+run\s+(?:watch|view)\b", _cmd_text(call))
             and re.search(r"deploy", out, re.I) and run_observation(out) == "success") or (
             pull_request and is_execution(call) and re.search(r"\bgh\s+pr\s+(?:view|create|list|checks)\b",
@@ -157,17 +168,42 @@ def _deploy_gap(deploy_claims, pairs) -> Tuple[bool, bool]:
 
 
 _CLAIMED_COUNT_RE = re.compile(r"\b(\d[\d,]*)\s*/\s*\1\b|\ball\s+(?=\d)(\d[\d,]*)|\b(\d[\d,]*)\s+(?:\w+\s+)?tests?\b")
+# Counts a runner prints about its own run; a bare number elsewhere ("1.12s") is not one.
+_SUMMARY_COUNT_RE = re.compile(
+    r"\b(\d+)\s+(?:passed|passing|tests?\s+pass(?:ed)?)\b|#\s*pass\s+(\d+)|\u2139\s*pass\s+(\d+)|"
+    r"\bRan\s+(\d+)\s+tests?\b|\bTests?:\s+(\d+)\s+passed\b|\b(\d+)\s*/\s*\6\b", re.I)
+
+
+# "30 / 30 checks passed": a checker's own all-pass summary.
+_ALL_PASSED_RE = re.compile(r"\b(\d+)\s*/\s*\1\s+(?:\w+\s+)?(?:passed|pass(?:ing)?|ok)\b", re.I)
+
+
+def _summary_counts(text):
+    return {n for groups in _SUMMARY_COUNT_RE.findall(str(text or "").replace(",", "")) for n in groups if n}
+
+
+def _claimed_counts(claims_of_kind):
+    return {n.replace(",", "") for s in claims_of_kind for groups in _CLAIMED_COUNT_RE.findall(s)
+            for n in groups if n}
+
+
+def _count_matched(test_claims, pairs) -> bool:
+    """A passing executed run whose own all-pass summary states every count the claim states."""
+    counts = _claimed_counts(test_claims)
+    return bool(counts) and any(
+        is_execution(call) and _run_passed(out, result)
+        and counts <= {m for m in _ALL_PASSED_RE.findall(str(out or "").replace(",", ""))}
+        for call, out, result in pairs)
 
 
 def _carried(kind, claims_of_kind, prior_pairs) -> bool:
     """Kai's carry-over rule: an earlier turn's passing receipt for the same operation."""
     if kind == "test":
         # A stated count must appear in the earlier passing run it restates.
-        counts = {n.replace(",", "") for s in claims_of_kind
-                  for groups in _CLAIMED_COUNT_RE.findall(s) for n in groups if n}
+        counts = _claimed_counts(claims_of_kind)
         runs = [o.replace(",", "") for c, o, r in prior_pairs
                 if runs_tests(c, o, TEST_CMD_RE, TEST_SUMMARY_RE) and _run_passed(o, r)]
-        return bool(runs) and all(any(re.search(rf"\b{n}\b", o) for o in runs) for n in counts) or (
+        return bool(runs) and all(any(n in _summary_counts(o) for o in runs) for n in counts) or (
             not counts and any(named_check_passed(s, prior_pairs, _run_passed) for s in claims_of_kind))
     if kind == "deploy":
         # Only a named target that an earlier turn observed carries over.
@@ -176,5 +212,6 @@ def _carried(kind, claims_of_kind, prior_pairs) -> bool:
         probed = {host_of(u) for c, o, r in prior_pairs if is_execution(c)
                   and PROBE_CMD_RE.search(_cmd_text(c)) and not r.get("_capture_ambiguous")
                   for u in URL_RE.findall(f"{_cmd_text(c)} {o}")}
-        return bool(hosts & probed) or bool(paths and _target_state_observed(prior_pairs, paths))
+        return bool(hosts & probed) or bool(paths and _target_state_observed(prior_pairs, paths)) or (
+            not hosts and any(_transfer_logged(c, o, r, paths) for c, o, r in prior_pairs))
     return receipt_covers(claims_of_kind, prior_pairs, _cmd_text, EXIT_OK_RE, strict=True)

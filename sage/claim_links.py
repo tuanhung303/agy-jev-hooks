@@ -14,6 +14,9 @@ _SCRIPT_PATH_RE = re.compile(r"[\w./~-]+\.(?:sh|py|c?m?js|ts)\b", re.I)
 _CHECKER_NAME_RE = re.compile(
     r"(?:^|[_./-])(?:tests?|spec|accept\w*|verify|validate|validator|smoke|checks?|e2e|audit|lint)"
     r"(?:[_./-]|$)", re.I)
+# Only a test or acceptance script can stand in for a test run; check, smoke,
+# verify, validate, audit and lint scripts check other things.
+_TEST_SCRIPT_NAME_RE = re.compile(r"(?:^|[_./-])(?:tests?|spec|accept\w*|e2e)(?:[_./-]|$)", re.I)
 _MAKE_TEST_RE = re.compile(r"(?:^|[\s;&|(\x22'])make\s+(?:test|tests|check|verify|e2e|smoke)\b", re.I)
 _TEST_OUTPUT_RE = re.compile(
     r"\b\d+\s+tests?\b(?!\s+(?:rows?|records?|data|files?|users?|accounts?|fixtures?))|"
@@ -53,7 +56,7 @@ def _script_names(command):
 def test_linked(command, output) -> bool:
     """A script whose path or output says it runs tests or checks."""
     paths = [p.lower().rsplit(".", 1)[0] for p in _SCRIPT_PATH_RE.findall(str(command or ""))]
-    return (any(_CHECKER_NAME_RE.search(path) for path in paths)
+    return (any(_TEST_SCRIPT_NAME_RE.search(path) for path in paths)
             or bool(_MAKE_TEST_RE.search(command)) or bool(_TEST_OUTPUT_RE.search(str(output or ""))))
 
 

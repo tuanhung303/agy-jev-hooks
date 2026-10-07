@@ -16,8 +16,9 @@ from sage.jev.config.catalog import COMPASS_CATEGORIES
 from sage.claim_assertions import _claim_sentences, _is_assertion, _sentences
 from sage.pipeline_claims import (
     BUILD_CLAIM_RE, COMPILE_CLAIM_RE, DATA_CLAIM_RE, DBT_CLAIM_RE, PIPELINE_CLAIM_RE,
-    attempts_operation, has_execution_or_edit, receipt_covers,
+    _claimed_run_id, attempts_operation, has_execution_or_edit, names_pipeline_run, receipt_covers,
 )
+from sage.run_logs import finished_outputs, subagent_reported
 from sage.claim_links import unreadable_turn
 from sage.pipeline_receipts import run_observation
 from sage.claim_receipts import _call_output_pairs, _cmd_text, is_execution
@@ -84,6 +85,16 @@ def _visual_evidence(steps: List[Dict[str, Any]]) -> Optional[Tuple[str, List[st
     return visual, flags
 
 
+def _last_polled(sentence: str, steps) -> str:
+    """Outcome of the latest system-delivered poll log for the run this claim names by ID."""
+    wanted = _claimed_run_id(sentence)
+    if not wanted:
+        return ""
+    seen = [run_observation(body, wanted) for body in finished_outputs(steps)]
+    seen = [outcome for outcome in seen if outcome not in ("absent", "unknown")]
+    return seen[-1] if seen else ""
+
+
 def uncovered_claims(reply: str, steps: List[Dict[str, Any]],
                      prior_steps: Optional[List[Dict[str, Any]]] = None) -> List[str]:
     """Gaps between asserted claims and receipts of that kind.
@@ -103,10 +114,12 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]],
             return False
         if prior is None:
             prior = _call_output_pairs(prior_steps)[0]
+        if kind == "pipeline" and all(_last_polled(s, prior_steps) == "success" for s in claims_of_kind):
+            return True  # the latest poll log the system delivered for that run succeeded
         return _carried(kind, claims_of_kind, prior)
     gaps: List[str] = []
     test_claims = [sentence for sentence in _claim_sentences(text, TEST_CLAIM_RE)
-                   if not re.search(r"\bdbt\s+test\b", sentence, re.I)]
+                   if not re.search(r"\bdbt\s+test\b", sentence, re.I) and not names_pipeline_run(sentence)]
     if test_claims:
         covered, attempted = _test_gap(test_claims, pairs)
         if not covered and (attempted or not carried("test", test_claims)):
@@ -137,17 +150,45 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]],
     # erases a captured failure of another.
     for sentence in pipeline_claims:
         # A status read attempts a pipeline claim only when it observed some run.
-        attempted = any(is_execution(call) and attempts_operation(sentence, _cmd_text(call), pairs)
+        # agy's own task status reads never observe a pipeline run.
+        attempted = any(is_execution(call) and str(call.get("name") or "").lower() != "manage_task"
+                        and attempts_operation(sentence, _cmd_text(call), pairs)
                         and not (PIPELINE_CLAIM_RE.search(sentence) and run_observation(out) == "absent")
                         for call, out, _result in pairs)
         uncertain = any(result.get("_capture_ambiguous") and is_execution(call)
                         and attempts_operation(sentence, _cmd_text(call), pairs)
-                        for call, _out, result in pairs)
+                        for call, _out, result in pairs) or subagent_reported(sentence, steps)
         if not uncertain and not receipt_covers([sentence], pairs, _cmd_text, EXIT_OK_RE) and (
                 attempted or not carried("pipeline", [sentence])):
             gaps.append("pipeline/data claim: no matching run, compile, or count-query receipt")
             break
     return gaps
+
+
+# Claim kinds that only log (WOULD_CLAIM) and never block, even when CLAIM is a
+# block tag. A kind is listed when its precision on the real-transcript sweep is
+# below 80%, counting undecidable flags as false. Round 8: deploy 2 of 4
+# (03cd1966:9, 26d9d153:9 true; 03cd1966:40, 6cd6eef0:10 undecidable).
+LOG_ONLY_CLAIM_KINDS = frozenset({"deploy"})
+
+
+def _hint(gaps: List[str]) -> str:
+    criterion = (COMPASS_CATEGORIES.get("not_verified") or {}).get(
+        "criterion", "A material outcome lacks evidence")
+    return f"jev_compass not_verified: {criterion} Evidence: " + "; ".join(gaps)
+
+
+def claim_contract_verdict(reply: str, steps: List[Dict[str, Any]],
+                           require_action: bool = False,
+                           prior_steps: Optional[List[Dict[str, Any]]] = None) -> Tuple[Optional[str], bool]:
+    """(hint, may_block): blocking gaps when any, else log-only gaps that never block."""
+    if not steps or (require_action and not has_execution_or_edit(steps)):
+        return None, False
+    gaps = uncovered_claims(reply, steps, prior_steps=prior_steps)
+    blocking = [gap for gap in gaps if gap.split(" ", 1)[0] not in LOG_ONLY_CLAIM_KINDS]
+    if blocking:
+        return _hint(blocking), True
+    return (_hint(gaps), False) if gaps else (None, False)
 
 
 def claim_contract_hint(reply: str, steps: List[Dict[str, Any]],
@@ -157,18 +198,19 @@ def claim_contract_hint(reply: str, steps: List[Dict[str, Any]],
     if not steps or (require_action and not has_execution_or_edit(steps)):
         return None
     gaps = uncovered_claims(reply, steps, prior_steps=prior_steps)
-    if not gaps:
-        return None
-    criterion = (COMPASS_CATEGORIES.get("not_verified") or {}).get(
-        "criterion", "A material outcome lacks evidence")
-    return f"jev_compass not_verified: {criterion} Evidence: " + "; ".join(gaps)
+    return _hint(gaps) if gaps else None
 
 
 def claim_contract_hint_for(reply: str, transcript_path: str,
                             require_action: bool = False,
                             steps: Optional[List[Dict[str, Any]]] = None,
-                            prior_steps: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
-    """Hook entry: same hint, steps read from a transcript path."""
+                            prior_steps: Optional[List[Dict[str, Any]]] = None,
+                            verdict: bool = False):
+    """Hook entry: same hint, steps read from a transcript path.
+
+    verdict=True returns (hint, may_block) from claim_contract_verdict instead.
+    """
+    empty = (None, False) if verdict else None
     try:
         if steps is None:
             from sage.transcript import _read_transcript_steps
@@ -176,8 +218,9 @@ def claim_contract_hint_for(reply: str, transcript_path: str,
             from sage.transcript import is_explicit_user_input
             starts = [i for i, step in enumerate(steps) if is_explicit_user_input(step)]
             if not starts:
-                return None
+                return empty
             steps, prior_steps = steps[starts[-1]:], steps[:starts[-1]]
-        return claim_contract_hint(reply, steps, require_action=require_action, prior_steps=prior_steps)
+        judge = claim_contract_verdict if verdict else claim_contract_hint
+        return judge(reply, steps, require_action=require_action, prior_steps=prior_steps)
     except Exception:
-        return None
+        return empty

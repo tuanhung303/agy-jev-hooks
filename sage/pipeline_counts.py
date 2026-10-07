@@ -43,6 +43,7 @@ def is_count_query(call, pairs, command_text):
 def counts_cover(sentence, pairs, command_text):
     claim_match = DATA_CLAIM_RE.search(sentence)
     tail = sentence[claim_match.end():] if claim_match else ""
+    tail = re.sub(r"(?<=\d),(?=\d{3}\b)", "", tail)  # thousands separators: 10,452 is one count
     expected_match = re.search(r"\s*[:=]?\s*(\d+)\s*(?:and|,|vs\.?)\s*(\d+)", tail, re.I)
     expected = tuple(map(int, expected_match.groups())) if expected_match else None
     if expected and expected[0] != expected[1]:
@@ -111,5 +112,8 @@ def counts_cover(sentence, pairs, command_text):
     if count_query_seen and not usable_observation:
         return None
     if count_query_seen and (not sources or not targets):
+        # One side was counted: it can still contradict the stated count.
+        if expected and (any(s != expected[0] for s in sources) or any(t != expected[1] for t in targets)):
+            return False
         return None
     return False

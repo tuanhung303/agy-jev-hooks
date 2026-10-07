@@ -313,7 +313,7 @@ def main():
     gates = (
         ("CLAIM", lambda: claim_contract_hint_for(
             reply, transcript_path, require_action=True, steps=turn_steps,
-            prior_steps=prior_steps), STEER_TEXT_LIMIT),
+            prior_steps=prior_steps, verdict=True), STEER_TEXT_LIMIT),
         ("FAIL", lambda: jev_verifier_hint(prompt, reply, transcript_path)
          if has_execution_or_edit(turn_steps) else None, STEER_TEXT_LIMIT),
         ("SKILL", lambda: stop_skill_steer(prompt, reply), SKILL_TEXT_LIMIT),
@@ -325,13 +325,15 @@ def main():
         except Exception as exc:
             log(f"{tag} gate unavailable: {exc}")
             continue
+        # A gate may return (hint, may_block): log-only claim kinds never block.
+        hint, may_block = hint if isinstance(hint, tuple) else (hint, True)
         if not hint:
             continue
         action = emit_steer(hint, limit)
         if not action:
             log(f"{tag} suppressed: sanitizer unavailable or failed")
             continue
-        if not tag_should_block(tag):
+        if not may_block or not tag_should_block(tag):
             log(f"WOULD_{tag} session={session_id}: {action}")
             if os.environ.get("AGY_STOP_AUDIT_MODE", "").strip().lower() == "shadow":
                 break

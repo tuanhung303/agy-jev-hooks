@@ -3,6 +3,8 @@ import ast
 import json
 import re
 
+from sage.run_logs import poll_records
+
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
@@ -152,7 +154,8 @@ def run_id(output):
 
 def has_run_record(output):
     """The output carries a run record: an ID or name together with a status."""
-    found = records(output) or gh_text_records(output) or [_text_record(output) or {}]
+    found = records(output) or gh_text_records(output) or poll_records(clean(output)) \
+        or [_text_record(output) or {}]
     return any((_record_id(r) or _keyed(r, _NAME_KEYS)) and _record_status(r) for r in found)
 
 
@@ -168,7 +171,7 @@ def run_observation(output, wanted_id=""):
     "unknown" when its records lack a terminal status, disagree, or cannot be
     associated with one run; "absent" when no record names a run.
     """
-    found = records(output) or gh_text_records(output) or None
+    found = records(output) or gh_text_records(output) or poll_records(clean(output)) or None
     if found is None:
         single = _text_record(output)
         found = [single] if single is not None else None

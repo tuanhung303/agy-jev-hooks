@@ -6,6 +6,7 @@ from sage.claim_receipts import (  # noqa: F401  (has_execution_or_edit re-expor
     has_execution_or_edit, is_execution,
 )
 from sage.jev.evidence.attribution import status_of
+from sage.run_logs import poll_records
 from sage.pipeline_counts import (  # noqa: F401  (DATA_CLAIM_RE re-exported)
     DATA_CLAIM_RE, counts_cover as _counts_cover, is_count_query as _is_count_query,
     sql_content_for as _sql_content_for,
@@ -55,10 +56,19 @@ def _dbt_summary(output, result_step=None):
 
 
 def _claimed_run_id(sentence):
+    named = re.search(r"\brun\s+ID\W{0,3}([\w.:-]{6,})", sentence, re.I)
+    if named:
+        return named.group(1)
     match = re.search(r"\b(?:pipeline|job|run)[\s_-]+([\w.-]+)\s+"
                       r"(?:succeed|complete|pass|finish)", sentence, re.I)
     value = match.group(1) if match else ""
     return "" if value.lower() in {"run", "job", "pipeline"} else value
+
+
+def names_pipeline_run(sentence):
+    """A "test run" sentence about a pipeline or job run, not a test runner."""
+    return bool(re.search(r"\btest\s+run\b", sentence, re.I)
+                and re.search(r"\b(?:pipeline|job|DAG|run\s+ID)\b", sentence, re.I))
 
 
 def _is_status_read(command):
@@ -79,7 +89,7 @@ def _readback_covers(sentence, pairs, command_text):
         command = command_text(call)
         # agy task status reads describe the agent's own task, not the pipeline.
         if str(call.get("name") or "").lower() == "manage_task" or not (
-                _is_status_read(command) or _is_api_read(command)):
+                _is_status_read(command) or _is_api_read(command) or poll_records(_clean(output))):
             continue
         if not _status_ok(output, result):
             continue
@@ -159,7 +169,7 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re, strict=False) -> 
                     continue
                 return False
         if PIPELINE_CLAIM_RE.search(sentence):
-            if re.search(r"\btest\s+run\b", sentence, re.I):
+            if re.search(r"\btest\s+run\b", sentence, re.I) and not names_pipeline_run(sentence):
                 continue
             covered = _readback_covers(sentence, pairs, command_text)
             if covered is None and not strict:

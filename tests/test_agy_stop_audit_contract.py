@@ -370,6 +370,18 @@ class PerTagModeTests(HookContractTestCase):
         self.assertEqual((code, out), (0, {}))
         self.assertIn("WOULD_CLAIM", self.hook.LOG_PATH.read_text())
 
+    def test_log_only_claim_verdict_never_blocks(self):
+        env = {"AGY_STOP_AUDIT_BLOCK_TAGS": "CLAIM", "AGY_STOP_AUDIT_MODE": ""}
+        with mock.patch.dict(self.hook.os.environ, env):
+            self.claims_mock.return_value = ("deploy claim: no target check", False)
+            code, out = self.run_main(self.payload(conversationId="log-only-claim"))
+            self.assertEqual((code, out), (0, {}))
+            self.assertIn("WOULD_CLAIM", self.hook.LOG_PATH.read_text())
+            self.claims_mock.return_value = ("test claim: no test run", True)
+            code, out = self.run_main(self.payload(conversationId="blocking-claim"))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.get("decision"), "continue")
+
     def test_global_shadow_mode_skips_later_remote_gates_after_finding(self):
         self.claims_mock.return_value = "claim gap: missing receipt"
         with mock.patch.dict(self.hook.os.environ, {"AGY_STOP_AUDIT_MODE": "shadow"}):
