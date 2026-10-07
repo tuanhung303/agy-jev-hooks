@@ -499,12 +499,14 @@ batch_id source_count target_count
     def test_pipeline_run_needs_status_readback_with_run_id(self):
         reply = "Pipeline run completed."
         self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, [])[0])
+        # A terminal status that names no run cannot be tied to the claim:
+        # unknown, so abstain rather than block (sol-review5 finding 3).
         no_id = [_call("run_command", {"command": "cloud job status"}, "p1"),
                  _out("p1", "status: Succeeded")]
-        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, no_id)[0])
+        self.assertEqual(claims.uncovered_claims(reply, no_id), [])
         invalid_id = [_call("run_command", {"command": "cloud job status"}, "p-invalid"),
                       _out("p-invalid", "status: Succeeded\nvalid: true")]
-        self.assertIn("pipeline/data claim", claims.uncovered_claims(reply, invalid_id)[0])
+        self.assertEqual(claims.uncovered_claims(reply, invalid_id), [])
         covered = [_call("run_command", {"command": "cloud job status"}, "p2"),
                    _out("p2", "run_id: 123456 status: Succeeded")]
         self.assertEqual(claims.uncovered_claims(reply, covered), [])

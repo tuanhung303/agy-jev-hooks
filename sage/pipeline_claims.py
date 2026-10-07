@@ -2,8 +2,8 @@
 import re
 
 from sage.claim_receipts import (  # noqa: F401  (has_execution_or_edit re-exported)
-    INSPECTION_RE as _INSPECTION_RE, _cmd_text as _call_text, _program, _stages,
-    has_execution_or_edit,
+    INSPECTION_RE as _INSPECTION_RE, SCRIPT_RE, _cmd_text as _call_text, _program, _stages,
+    has_execution_or_edit, is_execution,
 )
 from sage.jev.evidence.attribution import status_of
 from sage.pipeline_receipts import (
@@ -78,7 +78,9 @@ def _readback_covers(sentence, pairs, command_text):
     unknown = False
     for call, output, result in pairs:
         command = command_text(call)
-        if not (_is_status_read(command) or _is_api_read(command)):
+        # agy task status reads describe the agent's own task, not the pipeline.
+        if str(call.get("name") or "").lower() == "manage_task" or not (
+                _is_status_read(command) or _is_api_read(command)):
             continue
         if not _status_ok(output, result):
             continue
@@ -129,9 +131,10 @@ def _counts_cover(sentence, pairs, command_text):
         command = command_text(call)
         if not _is_count_query(call, pairs, command_text):
             continue
-        count_query_seen = True
         if not _status_ok(output, result_step):
-            return False
+            # A failed query observes nothing; a later successful retry decides.
+            continue
+        count_query_seen = True
         found, difference = _count_records(output)
         if found is None:
             unassociated = True
@@ -176,7 +179,9 @@ def _counts_cover(sentence, pairs, command_text):
     pair = (sources[0], targets[0]) if sources and targets else None
     consistent = bool(pair and len(set(sources)) == 1 and len(set(targets)) == 1
                       and pair[0] == pair[1] and (expected is None or pair == expected))
-    if consistent or bool(zero_difference and (expected is None or expected[0] == expected[1])):
+    rows_equal = bool(observed) and expected is None and all(
+        left is not None and left == right for left, right in observed)
+    if consistent or rows_equal or bool(zero_difference and (expected is None or expected[0] == expected[1])):
         return True
     if count_query_seen and not usable_observation:
         return None
@@ -186,8 +191,11 @@ def _counts_cover(sentence, pairs, command_text):
 
 
 def _unauditable_wrapper(pairs):
-    for call, output, _result in pairs:
+    for call, output, result in pairs:
         command = _call_text(call)
+        if is_execution(call) and SCRIPT_RE.search(command) and (
+                result.get("_capture_ambiguous") or (output and _status_ok(output, result))):
+            return True
         if re.search(r"\b(?:python3?\s+-c|node\s+-e|ruby\s+-e|perl\s+-e)\b", command, re.I) \
                 and not _is_api_read(command):
             if output:
@@ -204,7 +212,7 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
         # Unknown wrappers make absence inconclusive, but never erase an
         # explicit result for the operation named in this claim.
         uncertain_wrapper = _unauditable_wrapper(pairs) and not any(
-            attempts_operation(sentence, command_text(call), pairs)
+            is_execution(call) and attempts_operation(sentence, command_text(call), pairs)
             for call, _output, _result in pairs)
         if DBT_CLAIM_RE.search(sentence):
             match = re.search(r"\bdbt\s+(build|run|test)\b", sentence, re.I)
@@ -234,11 +242,13 @@ def receipt_covers(sentences, pairs, command_text, exit_ok_re) -> bool:
                     continue
                 return False
         if COMPILE_CLAIM_RE.search(sentence):
-            match = re.search(r"\b(?:compiled|compile|parse)\b", sentence, re.I)
-            action = "parse" if match and match.group(0).lower() == "parse" else "compile"
+            # The action is the keyword of the matched claim; compile implies parse.
+            keyword = COMPILE_CLAIM_RE.search(sentence).group(0).split()[0].lower()
+            action = "(?:parse|compile)" if keyword == "parse" else "compile"
             def compile_receipt(call, output, result):
                 command = command_text(call)
-                valid_command = bool(re.search(rf"\b(?:dbt\s+)?{action}\b|\btsc(?:\s|$)", command, re.I))
+                valid_command = bool(re.search(
+                    rf"\b(?:dbt\s+)?{action}\b|\btsc(?:\s|$)|\b(?:py_compile|compileall)\b", command, re.I))
                 status = status_of(result, _clean(output))
                 text = _clean(output)
                 count = re.search(r"\b(?:found\s+)?(\d+)\s+errors?\b", text, re.I)
@@ -279,7 +289,7 @@ def _claim_command_match(sentence, command, pairs):
     if BUILD_CLAIM_RE.search(sentence):
         return bool(re.search(r"\bbuild\b", command, re.I))
     if COMPILE_CLAIM_RE.search(sentence):
-        return bool(re.search(r"\b(?:compile|parse|tsc)\b", command, re.I))
+        return bool(re.search(r"\b(?:compile|parse|tsc|py_compile|compileall)\b", command, re.I))
     if PIPELINE_CLAIM_RE.search(sentence):
         return _is_status_read(command) or _is_api_read(command)
     if DATA_CLAIM_RE.search(sentence):

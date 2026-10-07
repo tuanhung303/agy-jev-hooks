@@ -55,7 +55,8 @@ def records(output):
 _STATUS_TEXT_RE = re.compile(r"\bstatus\b[\"']?\s*[:=]\s*[\"']?([\w-]+)", re.I)
 _ID_TEXT_RE = re.compile(
     r"[\"']?\b(?:run[_ -]?id|execution[_ -]?id|executionarn|id)\b[\"']?\s*[:=]\s*[\"']?([\w./:-]+)", re.I)
-_ID_KEYS = ("run_id", "execution_id", "executionArn", "id")
+_ID_KEYS = ("runid", "executionid", "executionarn", "id")
+_NAME_KEYS = ("pipelinename", "jobname", "workflowname", "name")
 
 
 def _text_record(output):
@@ -80,11 +81,22 @@ def status_record(output):
     return found[0] if len(found) == 1 else {}
 
 
-def _record_id(record):
-    for key in _ID_KEYS:
-        if record.get(key) is not None:
-            return str(record[key]).strip()
+def _keyed(record, keys):
+    """First value under any of keys, matched case-insensitively without `_`."""
+    folded = {re.sub(r"[_\s-]", "", str(k)).lower(): v for k, v in record.items()}
+    for key in keys:
+        if folded.get(key) is not None:
+            return str(folded[key]).strip()
     return ""
+
+
+def _record_id(record):
+    return _keyed(record, _ID_KEYS)
+
+
+def _names_run(record, wanted):
+    wanted = wanted.casefold()
+    return _record_id(record).casefold() == wanted or _keyed(record, _NAME_KEYS).casefold() == wanted
 
 
 def _record_status(record):
@@ -102,6 +114,7 @@ def run_id(output):
 
 _TERMINAL_SUCCESS = {"succeeded", "success", "completed", "complete"}
 _TERMINAL_FAILURE = {"failed", "failure", "error", "cancelled", "canceled", "aborted"}
+_NOT_FINISHED = {"inprogress", "in_progress", "queued", "running", "notstarted", "pending"}
 
 
 def run_observation(output, wanted_id=""):
@@ -117,21 +130,25 @@ def run_observation(output, wanted_id=""):
         found = [single] if single is not None else None
     if found is None:
         return "unknown"
-    with_id = [r for r in found if _record_id(r)]
+    with_id = [r for r in found if _record_id(r) or _keyed(r, _NAME_KEYS)]
+    if not with_id:
+        # A status read that names no run cannot be tied to the claim.
+        return "unknown" if any(_record_status(r) for r in found) else "absent"
     if wanted_id:
-        mine = [r for r in with_id if _record_id(r).casefold() == wanted_id.casefold()]
+        mine = [r for r in with_id if _names_run(r, wanted_id)]
     elif len(with_id) == 1:
         mine = with_id
     else:
         statuses = {_record_status(r) for r in with_id}
-        if with_id and statuses <= _TERMINAL_SUCCESS:
+        if statuses <= _TERMINAL_SUCCESS:
             return "success"
-        return "unknown" if with_id else "absent"
+        return "unknown"
     if not mine:
         return "absent"
     statuses = {_record_status(r) for r in mine}
     failed, passed = statuses & _TERMINAL_FAILURE, statuses & _TERMINAL_SUCCESS
-    if failed and not passed:
+    if (failed or statuses & _NOT_FINISHED) and not passed:
+        # A run still in progress contradicts a completion claim.
         return "failure"
     if passed and not failed and not (statuses - _TERMINAL_SUCCESS - {""}):
         return "success"
@@ -186,9 +203,13 @@ def count_records(output):
         while cursor < len(lines) and (not lines[cursor].strip() or
                 re.fullmatch(r"[\s|+:-]+", lines[cursor])):
             cursor += 1
-        row = lines[cursor] if cursor < len(lines) else ""
-        cells = re.findall(r"\S+", row)
-        if len(cells) >= len(headers) and not re.search(r"rows? affected|rows? returned", row, re.I):
+        # Every data row is its own record, up to a blank line or footer.
+        for row in lines[cursor:]:
+            if not row.strip() or re.search(r"rows? affected|rows? returned", row, re.I):
+                break
+            cells = re.findall(r"\S+", row)
+            if len(cells) < len(headers):
+                break
             row_labels = {}
             for label, cell in zip(labels, cells):
                 match = re.fullmatch(r"-?\d+", cell.strip("|"))

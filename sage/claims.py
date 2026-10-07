@@ -19,7 +19,7 @@ from sage.pipeline_claims import (
     attempts_operation, has_execution_or_edit, receipt_covers,
 )
 from sage.jev.evidence.attribution import status_of
-from sage.claim_receipts import _call_output_pairs, _cmd_text
+from sage.claim_receipts import SCRIPT_RE, _call_output_pairs, _cmd_text, is_execution
 TEST_CLAIM_RE = re.compile(
     r"\btests? (?:pass|passed|are green|all green|run clean)\b|\b\d+ tests? passed\b"
     r"|\ball tests pass\b|\btest run (?:pass(?:ed)?|succeed(?:ed)?|completed)\b|"
@@ -29,6 +29,9 @@ DEPLOY_CLAIM_RE = re.compile(
 DEPLOY_DESCRIPTION_RE = re.compile(
     r"\bpublished\s+(?:measures?|reruns?|attempts?|events?|statuses?|records?|rows?|rules?|tables?)\b|"
     r"\bpublication status\b|\bevaluates?\s+to\s+published\b", re.I)
+# Narrative about a named third party ("Acme deployed X") is not our claim.
+THIRD_PARTY_DEPLOY_RE = re.compile(
+    r"\b(?!(?:I|We|It|This|That|The|Code|App|Service|Build)\b)[A-Z][\w-]+\s+(?:has\s+|had\s+)?deployed\b")
 VISUAL_CLAIM_RE = re.compile(r"\b(?:screenshot|screen shot)\b|ảnh chụp", re.I)
 # Chỉ claim khi reply gắn ảnh với chứng cứ do chính nó tạo, không phải ảnh
 # người dùng gửi hay ảnh được nhắc tới trong câu chuyện.
@@ -40,7 +43,15 @@ COMPLETION_CLAIM_RE = re.compile(
     r"updated|migrated|xong|hoàn tất|hoàn thành|đã)\b", re.I)
 TEST_CMD_RE = re.compile(
     r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|phpunit|node\s+--test|npm (?:run )?test|"
-    r"yarn test|make test|tox|go test|cargo test|ctest)\b", re.I)
+    r"yarn test|pnpm (?:run )?test|bun test|deno test|tsx\s+--test|make test|tox|go test|cargo test|"
+    r"ctest)\b", re.I)
+# Runner-agnostic summaries: a script that prints one of these ran tests.
+TEST_SUMMARY_RE = re.compile(
+    r"#\s*pass\s+\d+\s+#\s*fail\s+0\b|\bRan \d+ tests? in [\d.]+s\s+OK\b|"
+    r"\b\d+ passed\b[^\n]{0,60}\bin [\d.]+s\b|\bTests?:\s+\d+ passed\b", re.I)
+# A successful script whose output the gate cannot classify is unauditable.
+TEST_WRAPPER_RE = re.compile(SCRIPT_RE.pattern + r"|(?:^|[\s;&|(\x22'])make\s+\w+", re.I)
+_WRAPPER_TOPIC_RE = re.compile(r"\b(?:tests?|checks?|accept\w*|verify|spec|smoke)\b|test", re.I)
 EXIT_OK_RE = re.compile(r"exit[=: ]+0\b|exited with code 0\b", re.I)
 URL_RE = re.compile(r"https?://[^\s)\]]+")
 PATH_RE = re.compile(
@@ -111,6 +122,21 @@ def _same_scope(command: str, targets: List[str]) -> bool:
     return any(w and w in m.lower() for w in wanted for m in mentioned)
 
 
+def _unclassified_test_wrapper(call, out, result, targets) -> bool:
+    """A test-shaped script that exited 0, or any script whose result is unknown."""
+    command = _cmd_text(call)
+    if not is_execution(call) or not TEST_WRAPPER_RE.search(command) or not _same_scope(command, targets):
+        return False
+    if (result or {}).get("_capture_ambiguous"):
+        return True  # a script with an unknown result may have run the tests
+    if not _WRAPPER_TOPIC_RE.search(f"{command}\n{out}"):
+        return False
+    text = str(out or "")
+    if _RUN_FAILURE_RE.search(text) or _RUN_FAILED_TOKEN_RE.search(text):
+        return False
+    return status_of(result or {}, text) == "0" or bool(EXIT_OK_RE.search(text))
+
+
 def _target_state_observed(pairs, targets=()) -> bool:
     """State-check command với output thật (không chỉ exit line, không phải
     output của chính script deploy)."""
@@ -147,17 +173,20 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
         covered = False
         for call, out, result in pairs:
             command = str(call.get("args") or call.get("arguments") or "")
-            if TEST_CMD_RE.search(command) and _same_scope(command, targets) and _run_passed(out, result):
+            ran_tests = TEST_CMD_RE.search(command) or (
+                is_execution(call) and TEST_SUMMARY_RE.search(str(out or "")))
+            if ran_tests and _same_scope(command, targets) and _run_passed(out, result):
                 covered = True
                 break
-        uncertain = any(TEST_CMD_RE.search(_cmd_text(call))
+        uncertain = any(is_execution(call) and TEST_CMD_RE.search(_cmd_text(call))
                         and _same_scope(_cmd_text(call), targets)
                         and result.get("_capture_ambiguous")
-                        for call, _out, result in pairs)
+                        for call, _out, result in pairs) or any(
+            _unclassified_test_wrapper(call, out, result, targets) for call, out, result in pairs)
         if not covered and not uncertain:
             gaps.append("test claim: no test-run receipt with a passing result")
     deploy_claims = [s for s in _claim_sentences(text, DEPLOY_CLAIM_RE)
-                     if not DEPLOY_DESCRIPTION_RE.search(s)]
+                     if not DEPLOY_DESCRIPTION_RE.search(s) and not THIRD_PARTY_DEPLOY_RE.search(s)]
     if deploy_claims:
         paths = [p for sentence in deploy_claims for p in PATH_RE.findall(sentence)]
         hosts = {host_of(u) for sentence in deploy_claims for u in URL_RE.findall(sentence)}
@@ -179,7 +208,7 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
             gaps.append("deploy claim: no target-state receipt "
                         "(URL/status check, or ls/stat/hash of the deployed target)")
     visual_claims = [s for s in _claim_sentences(text, VISUAL_CLAIM_RE)
-                     if VISUAL_PROOF_RE.search(s)]
+                     if VISUAL_PROOF_RE.search(VISUAL_CLAIM_RE.sub(" ", s))]
     if visual_claims:
         evidence = _visual_evidence(steps)
         if evidence is None:
@@ -196,7 +225,7 @@ def uncovered_claims(reply: str, steps: List[Dict[str, Any]]) -> List[str]:
     # Each assertion is judged alone: uncertainty about one operation never
     # erases a captured failure of another.
     for sentence in pipeline_claims:
-        uncertain = any(result.get("_capture_ambiguous")
+        uncertain = any(result.get("_capture_ambiguous") and is_execution(call)
                         and attempts_operation(sentence, _cmd_text(call), pairs)
                         for call, _out, result in pairs)
         if not uncertain and not receipt_covers([sentence], pairs, _cmd_text, EXIT_OK_RE):

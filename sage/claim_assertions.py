@@ -13,7 +13,8 @@ _REPORTED_SPEECH_RE = re.compile(
 _NEGATION_BEFORE_RE = re.compile(
     r"\b(?:not|never|cannot|can'?t|won'?t|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|"
     r"hasn'?t|haven'?t|hadn'?t|no longer|yet to|instead of|rather than|if|unless|whether|"
-    r"suppose|imagine|pretend|would|should|could|might|may|will)\b|"
+    r"suppose|imagine|pretend|would|should|could|might|may|will|must|can|ought to|"
+    r"needs? to|has to|have to)\b|"
     r"\bchưa\b|\bkhông\b|\bsẽ\b|\bnếu\b|\bđừng\b|\bgiả sử\b", re.I)
 _NEGATION_AFTER_RE = re.compile(
     r"\b(?:may|might|does|do|is|are|was|were|could|would|can|will)\s+not\b|"

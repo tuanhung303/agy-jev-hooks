@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Tuple
 
 _ECHO_RE = re.compile(r"^\s*(?:echo|printf)\b", re.I)
 _AGY_RESULT_RE = re.compile(r"^\s*Created At:", re.I)
+_BACKGROUND_RE = re.compile(r"Tool is running as a background task with task id:\s*(\S+)", re.I)
+_EXIT_CODE_RE = re.compile(r"exited with code \d+|exit[=: ]+\d+", re.I)
+_EXPLICIT_FAILURE_RE = re.compile(
+    r"#\s*fail\s+[1-9]|\b[1-9]\d*\s+(?:failed|failing)\b|\bERROR\s*=\s*[1-9]", re.I)
 
 
 def _cmd_text(call: Dict[str, Any]) -> str:
@@ -57,6 +61,38 @@ def _output_id(step: Dict[str, Any]) -> str:
     meta = step.get("metadata") if isinstance(step.get("metadata"), dict) else {}
     return str(step.get("tool_call_id") or step.get("call_id") or meta.get("tool_call_id")
                or meta.get("call_id") or "")
+
+
+def _background_result(steps, start, task_id):
+    """The completion record of a background task, or an uncertain capture.
+
+    A native background launch returns only a task handle. Its outcome comes
+    later, from a `Task id ... finished with result` system message or a
+    `manage_task` status read with `Status: DONE` for the same task ID.
+    """
+    finished, status_done = "", ""
+    escaped = re.escape(task_id)
+    for step in steps[start + 1:]:
+        if not isinstance(step, dict):
+            continue
+        text = str(step.get("content") or "")
+        if task_id not in text:
+            continue
+        match = re.search(rf"Task id \"?{escaped}\"? finished with result:?(.*)", text, re.S)
+        if match:
+            finished = match.group(1).split("</SYSTEM_MESSAGE>")[0].strip()
+            continue
+        if re.search(rf"^Task:\s*{escaped}\s*$", text, re.M) and re.search(r"^Status:\s*DONE\b", text, re.M):
+            status_done = text
+    content = "\n".join(part for part in (finished, status_done) if part)
+    if not content:
+        return {"_capture_ambiguous": True, "_background_task": task_id}
+    result = {"content": content, "_background_task": task_id}
+    if not _EXIT_CODE_RE.search(content) and not _EXPLICIT_FAILURE_RE.search(content):
+        # A DONE status without an exit code proves completion, not outcome:
+        # a pass summary can still cover, but absence of one is not a gap.
+        result["_capture_ambiguous"] = True
+    return result
 
 
 def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], str, Dict[str, Any]]], bool]:
@@ -150,6 +186,7 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
         settled = all(dep in outputs and dep not in duplicate_ids for dep in depends)
         positional[id(item)] = step if settled else {"_capture_ambiguous": True}
 
+    position = {id(step): index for index, step in enumerate(steps or [])}
     pairs = []
     ambiguous = False
     for item in calls:
@@ -160,6 +197,9 @@ def _call_output_pairs(steps: List[Dict[str, Any]]) -> Tuple[List[Tuple[Dict[str
                 result = {"_capture_ambiguous": True}
         else:
             result = positional.get(id(item)) or {"_capture_ambiguous": True}
+        background = _BACKGROUND_RE.search(str(result.get("content") or ""))
+        if background and id(result) in position:
+            result = _background_result(steps, position[id(result)], background.group(1))
         ambiguous = ambiguous or bool(result.get("_capture_ambiguous"))
         if _is_echo_command(_cmd_text(item)):
             continue
@@ -186,6 +226,18 @@ MUTATING_TOOL_NAMES = {
     "edit_file", "create_file", "apply_diff", "patch", "modify_file",
     "write_file", "write", "edit", "multiedit", "notebook_edit", "notebookedit",
 }
+
+
+# A script run: its output is the script's own, so the gate cannot classify it.
+SCRIPT_RE = re.compile(
+    r"(?:^|[\s;&|(\x22'])(?:(?:ba|z)?sh\s+\S+\.sh|\./\S+\.sh|python3?\s+(?!-c\b)\S+\.py|"
+    r"node\s+(?!-e\b)\S+\.(?:c|m)?js)", re.I)
+_SHELL_TOOL_NAMES = {"run_command", "bash", "exec", "terminal", "cmd", "command", "manage_task", ""}
+
+
+def is_execution(call) -> bool:
+    """A shell run or a background-task status read; timers and file tools are not."""
+    return str(call.get("name") or "").strip().lower() in _SHELL_TOOL_NAMES
 
 
 def has_execution_or_edit(steps) -> bool:
