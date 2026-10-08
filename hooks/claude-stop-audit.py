@@ -36,6 +36,10 @@ SENTINEL_PATH = Path.home() / ".config" / "agy" / "sage.sentinel"
 MAX_STEERS_PER_GATE = 2
 # Wall-clock budget for the Compass call; Claude's hook timeout sits above it.
 JEV_GATE_BUDGET_SECONDS = 8.0
+# Deferral checklist: logged on every deferred-looking reply; it steers only
+# when CLAUDE_DEFERRAL_MODE=block (independent of CLAUDE_STOP_AUDIT_MODE).
+DEFERRAL_BUDGET_SECONDS = 4.0
+DEFERRAL_CHECK_VERSION = "deferral-v1"
 STEER_TEXT_LIMIT = 1200
 PROMPT_LOG_CHARS = 200
 STEER_TAG = "[claude-stop-audit]"
@@ -151,6 +155,23 @@ def compass_hint(transcript_path, reply=None):
         return None
 
 
+def deferral_verdict(steps, turn, reply):
+    """Deferral checklist record, or None when the reply defers nothing (fail open)."""
+    if os.environ.get("CLAUDE_DEFERRAL_CHECK") == "0" or not reply:
+        return None
+    try:
+        from sage.deferral import check_deferral
+        requests = [str(step.get("content") or "") for step in steps if is_explicit_user_input(step)]
+        result = check_deferral(requests, turn, reply,
+                                deadline=time.monotonic() + DEFERRAL_BUDGET_SECONDS)
+    except Exception as exc:
+        result = {"verdict": "error", "error": type(exc).__name__}
+    if result is not None:
+        result["check"] = DEFERRAL_CHECK_VERSION
+        result["offer"] = sanitize(result.get("offer"), PROMPT_LOG_CHARS)
+    return result
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -160,7 +181,8 @@ def audit(payload, block):
     session_id = str(payload.get("session_id") or "")
     transcript_path = str(payload.get("transcript_path") or "")
     started = time.monotonic()
-    turn = current_turn(_read_steps_bounded(transcript_path))
+    steps = _read_steps_bounded(transcript_path)
+    turn = current_turn(steps)
     logged_reply = turn_reply(turn)
     reply = str(payload.get("last_assistant_message") or "").strip() or logged_reply
     writes = turn_writes(turn)
@@ -177,6 +199,15 @@ def audit(payload, block):
             continue
         decision, gate, steer = f"{'block' if block else 'would_block'}:{name}", name, text
         break
+    deferral = deferral_verdict(steps, turn, reply)
+    if deferral and deferral.get("verdict") == "continue" and gate is None:
+        if os.environ.get("CLAUDE_DEFERRAL_MODE") != "block":
+            decision = "would_block:deferral"
+        elif steer_count(session_id, "deferral") >= MAX_STEERS_PER_GATE:
+            decision = "capped:deferral"
+        else:
+            from sage.deferral import steer_text
+            decision, gate, steer = "block:deferral", "deferral", sanitize(steer_text(deferral))
     record = {
         "ts": _now(),
         "session": session_id,
@@ -189,6 +220,7 @@ def audit(payload, block):
         # Compass judged a transcript without it.
         "reply_in_transcript": bool(reply) and logged_reply == reply,
         **verdicts,
+        "deferral": deferral,
         "decision": decision,
         "latency_s": round(time.monotonic() - started, 2),
     }
@@ -214,7 +246,9 @@ def main():
     block = os.environ.get("CLAUDE_STOP_AUDIT_MODE") == "block"
     decision, gate, steer, record = audit(payload, block)
     log_record(record)
-    if block and steer:
+    # Other gates steer only in block mode; deferral sets a steer only when
+    # its own mode flag allows it.
+    if steer and (block or gate == "deferral"):
         bump_steer_count(record["session"], gate)
         sys.stderr.write(f"{STEER_TAG} {steer}\n")
         return 2

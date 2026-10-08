@@ -1,0 +1,21 @@
+{
+ "checkpoint": {
+  "name": "deferral-v1",
+  "git_tag": "deferral-v1-checkpoint",
+  "ts": "2026-10-08T02:52:01+00:00",
+  "mode": "shadow (CLAUDE_DEFERRAL_MODE unset)",
+  "log_field": "deferral (check=deferral-v1) in claude-stop-audit audit.jsonl",
+  "eval_data": "~/.local/state/agy-jev-hooks/deferral-eval/2026-10-08/ (private, not in repo)"
+ },
+ "offline": {
+  "tuning_set": {"n": 60, "real": 40, "synthetic": 20, "expect_continue": 16,
+                 "precision": 0.80, "recall": 0.75, "tp": 12, "fp": 3, "fn": 4, "tn": 41,
+                 "note": "questions were tuned on this set; optimistic"},
+  "heldout_set": {"n": 100, "expect_continue": 23, "labeler": "blind Sonnet 5.5 medium, 19 unsure, 3 lead overrides",
+                  "precision": 0.83, "recall": 0.43, "tp": 10, "fp": 2, "fn": 13, "tn": 75,
+                  "jev_only_precision": 0.71},
+  "jev_call_latency_p50_s": 0.69,
+  "run_to_run_flips": "2 of 60 decisions flipped between two identical runs (near the 0.5 ceiling)",
+  "block_bar": "precision >= 0.85 on a fresh held-out set before CLAUDE_DEFERRAL_MODE=block"
+ }
+}
