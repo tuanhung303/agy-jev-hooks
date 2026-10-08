@@ -99,6 +99,7 @@ def main():
         "by_check": dict(Counter(r["deferral"].get("check") for r in checked)),
         "rules_source": dict(Counter(r["deferral"].get("rules") for r in checked)),
         "verdicts": dict(verdicts),
+        "branches": dict(Counter(r["deferral"].get("branch") for r in checked if r["deferral"].get("branch"))),
         "hard_holds": dict(holds),
         "latency_s": {"p50": statistics.median(lat) if lat else None, "p95": pct(lat, 0.95), "max": max(lat, default=None)},
         "continue_next_user_proxy": dict(proxy),

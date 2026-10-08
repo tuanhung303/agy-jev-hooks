@@ -39,7 +39,7 @@ JEV_GATE_BUDGET_SECONDS = 8.0
 # Deferral checklist: logged on every deferred-looking reply; it steers only
 # when CLAUDE_DEFERRAL_MODE=block (independent of CLAUDE_STOP_AUDIT_MODE).
 DEFERRAL_BUDGET_SECONDS = 4.0
-DEFERRAL_CHECK_VERSION = "deferral-v2"  # v2: gates from the rules file; goal/policy/case/offer blocks
+DEFERRAL_CHECK_VERSION = "deferral-v3"  # v2: gates from the rules file; goal/policy/case/offer blocks
 STEER_TEXT_LIMIT = 1200
 PROMPT_LOG_CHARS = 200
 STEER_TAG = "[claude-stop-audit]"

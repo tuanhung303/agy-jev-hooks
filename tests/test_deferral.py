@@ -19,14 +19,19 @@ from test_claude_stop_audit import SESSION, load_hook
 from test_claude_transcript import human, reply, tool_result, tool_use
 
 CONFIG = {"client_systems": ["Client A cloud", "Client B lakehouse"], "frontend_host": "app.example.com"}
-CLEAR = {"d_defer": 0.95, **{k: 0.1 for k in D.RISKS}}
+CLEAR = {"continue": 0.9, **{k: 0.1 for k in D.RISKS}}
 WEDNESDAY, SATURDAY = 2, 5
 
 
-def jev_answers(probs):
+def jev_answers(probs, branch="finish_own"):
     def call(state, questions, attempt_timeout, deadline):
-        assert set(questions) == {"d_defer", *D.RISKS}
-        return {"answers": {k: {"type": "boolean", "probability": v} for k, v in probs.items()}}
+        assert set(questions) == {D.BRANCH, *D.RISKS}
+        assert questions[D.BRANCH]["type"] == "choice" and branch in questions[D.BRANCH]["criteria"]
+        answers = {k: {"type": "boolean", "probability": v} for k, v in probs.items() if k != "continue"}
+        rest = round(1 - probs["continue"], 3)
+        answers[D.BRANCH] = {"type": "choice", "choice": branch,
+                             "probabilities": {branch: probs["continue"], "optional_extra": rest}}
+        return {"answers": answers}
     return call
 
 
@@ -63,8 +68,8 @@ class DeferralUnitTests(unittest.TestCase):
         self.assertEqual(D.decide(CLEAR, []), "continue")
         self.assertEqual(D.decide(CLEAR, ["message"]), "hold")
         self.assertEqual(D.decide({**CLEAR, "x_external": 0.7}, []), "hold")
-        self.assertEqual(D.decide({**CLEAR, "d_defer": 0.2}, []), "hold")
-        self.assertEqual(D.decide({"d_defer": 0.9}, []), "error")
+        self.assertEqual(D.decide({**CLEAR, "continue": 0.2}, []), "hold")
+        self.assertEqual(D.decide({"continue": 0.9}, []), "error")
 
     def test_check_deferral_end_to_end_and_fail_open(self):
         turn = [{"type": "USER_INPUT", "content": "fix the off-by-one, commit when tests pass"},
@@ -76,7 +81,11 @@ class DeferralUnitTests(unittest.TestCase):
             result = D.check_deferral(["fix the off-by-one, commit when tests pass"], turn, text,
                                       call=jev_answers(CLEAR))
             self.assertEqual(result["verdict"], "continue")
+            self.assertEqual(result["branch"], "finish_own")
             self.assertEqual(result["offer"], "Want me to commit?")
+            self.assertIn("finishes the agent's own work", D.steer_text(result))
+            held = D.check_deferral(["fix it"], turn, text, call=jev_answers({**CLEAR, "continue": 0.3}, "user_decision"))
+            self.assertEqual((held["verdict"], held["branch"]), ("hold", "user_decision"))
             self.assertIsNone(D.check_deferral(["x"], turn, "Done and committed.", call=jev_answers(CLEAR)))
 
             def broken(*a, **k):
@@ -100,7 +109,11 @@ class DeferralUnitTests(unittest.TestCase):
             self.assertEqual(state["offer"], "Want me to commit?")
             self.assertEqual(state["case"]["earlier_requests"], ["fix it"])
             self.assertEqual(state["case"]["latest_request"], "commit when done")
-            self.assertEqual(body["questions"]["x_gate"]["instructions"]["judge"], "offer")
+            self.assertEqual(body["questions"]["x_external"]["instructions"]["judge"], "offer")
+            tree = body["questions"][D.BRANCH]
+            self.assertEqual((tree["type"], tree["instructions"]["judge"]), ("choice", "offer"))
+            self.assertIn("elif:", tree["instructions"]["tree"])
+            self.assertTrue(set(D.load_case("deferral")["parse"]["continue_branches"]) <= set(tree["criteria"]))
             path.write_text("# Rules without markers\n", encoding="utf-8")
             self.assertIsNone(D.read_gates(path))
             self.assertIsNone(D.read_gates(Path(tmp) / "missing.md"))

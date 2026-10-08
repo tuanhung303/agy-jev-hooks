@@ -1,58 +1,128 @@
 {
  "checkpoint": {
-  "name": "deferral-v2",
-  "git_tag": "deferral-v2-checkpoint",
-  "ts": "2026-10-08T03:28:28+00:00",
+  "name": "deferral-v3",
+  "git_tag": "deferral-v3-checkpoint",
+  "ts": "2026-10-08T03:40:02+00:00",
   "mode": "shadow (CLAUDE_DEFERRAL_MODE unset)",
-  "log_field": "deferral (check=deferral-v2, rules=rules_file|fallback) in claude-stop-audit audit.jsonl",
+  "log_field": "deferral (check=deferral-v3, branch=<tree leaf>, p.continue + 4 vetoes) in claude-stop-audit audit.jsonl",
   "eval_data": "~/.local/state/agy-jev-hooks/deferral-eval/2026-10-08/ (private, not in repo)",
-  "changes": "gates read from the marked block in ~/.claude/CLAUDE.md (single source); request split into goal/policy/case/offer blocks with list-valued case fields; questions name the field they judge; x_user_only reworded so a plain yes/no on a doable step is not a user-only decision"
+  "changes": "8 independent veto questions replaced by one choice question that walks an ordered if/else tree (YAML text) to a branch, plus 4 objective vetoes (x_external, x_irreversible, x_guess, x_costly); continue iff the continue branches hold > 0.5 of the probability and every veto < 0.5"
  },
  "offline": {
+  "fresh_set": {
+   "n": 100,
+   "sessions": 32,
+   "expect_continue": 28,
+   "labeler": "blind Sonnet, rules given as a YAML decision tree, 17 unsure, 1 lead override (F032)",
+   "runs": [
+    {
+     "precision": 1.0,
+     "recall": 0.36,
+     "tp": 10,
+     "fp": 0
+    },
+    {
+     "precision": 0.91,
+     "recall": 0.36,
+     "tp": 10,
+     "fp": 1
+    }
+   ],
+   "run_to_run_flips": "3 of 100 verdicts",
+   "note": "v2 and the per-question tree variant were scored on this set first (both 0.67 / 0.14); their blocker breakdown informed the v3 design, so the set is lightly contaminated. Labeller tree and v3 tree share structure."
+  },
   "tuning_set": {
    "n": 60,
    "precision": 0.83,
    "recall": 0.62,
    "tp": 10,
-   "fp": 2,
-   "fn": 6,
-   "tn": 42
+   "fp": 2
   },
-  "heldout_set": {
+  "old_heldout_set": {
    "n": 100,
-   "expect_continue": 23,
-   "runs": [
-    {
-     "precision": 0.73,
-     "recall": 0.35,
-     "fp": 3
-    },
-    {
-     "precision": 0.82,
-     "recall": 0.39,
-     "fp": 2
-    }
-   ],
-   "note": "held-out was used to diagnose the v1.1 regression and the v2 x_user_only defect, so it is no longer clean; a fresh held-out set is required before block mode"
+   "precision": 0.79,
+   "recall": 0.48,
+   "tp": 11,
+   "fp": 3,
+   "note": "contaminated by earlier diagnosis"
   },
-  "comparison": {
-   "v1": {
-    "precision": 0.83,
-    "recall": 0.43
-   },
-   "v1.1_flat_rules_from_claude_md": {
-    "precision": 0.67,
-    "recall": 0.35
-   },
+  "comparison_fresh": {
    "v2": {
-    "precision": "0.73-0.82",
-    "recall": "0.35-0.39"
+    "precision": 0.67,
+    "recall": 0.14
+   },
+   "v2_questions_as_yaml_trees": {
+    "precision": 0.67,
+    "recall": 0.14
+   },
+   "v3_tree_only_no_vetoes_tuning": {
+    "precision": 0.73,
+    "recall": 0.69
+   },
+   "v3": {
+    "precision": "0.91-1.00",
+    "recall": 0.36
    }
   },
-  "jev_call_latency_p50_s": 0.68,
-  "block_bar": "precision >= 0.85 on a fresh held-out set before CLAUDE_DEFERRAL_MODE=block"
+  "jev_call_latency_p50_s": 0.66,
+  "block_bar": "precision >= 0.85 on a fresh held-out set before CLAUDE_DEFERRAL_MODE=block: met on point estimate (10-11 continues), small n"
  },
  "history": [
+  {
+   "checkpoint": {
+    "name": "deferral-v2",
+    "git_tag": "deferral-v2-checkpoint",
+    "ts": "2026-10-08T03:28:28+00:00",
+    "mode": "shadow (CLAUDE_DEFERRAL_MODE unset)",
+    "log_field": "deferral (check=deferral-v2, rules=rules_file|fallback) in claude-stop-audit audit.jsonl",
+    "eval_data": "~/.local/state/agy-jev-hooks/deferral-eval/2026-10-08/ (private, not in repo)",
+    "changes": "gates read from the marked block in ~/.claude/CLAUDE.md (single source); request split into goal/policy/case/offer blocks with list-valued case fields; questions name the field they judge; x_user_only reworded so a plain yes/no on a doable step is not a user-only decision"
+   },
+   "offline": {
+    "tuning_set": {
+     "n": 60,
+     "precision": 0.83,
+     "recall": 0.62,
+     "tp": 10,
+     "fp": 2,
+     "fn": 6,
+     "tn": 42
+    },
+    "heldout_set": {
+     "n": 100,
+     "expect_continue": 23,
+     "runs": [
+      {
+       "precision": 0.73,
+       "recall": 0.35,
+       "fp": 3
+      },
+      {
+       "precision": 0.82,
+       "recall": 0.39,
+       "fp": 2
+      }
+     ],
+     "note": "held-out was used to diagnose the v1.1 regression and the v2 x_user_only defect, so it is no longer clean; a fresh held-out set is required before block mode"
+    },
+    "comparison": {
+     "v1": {
+      "precision": 0.83,
+      "recall": 0.43
+     },
+     "v1.1_flat_rules_from_claude_md": {
+      "precision": 0.67,
+      "recall": 0.35
+     },
+     "v2": {
+      "precision": "0.73-0.82",
+      "recall": "0.35-0.39"
+     }
+    },
+    "jev_call_latency_p50_s": 0.68,
+    "block_bar": "precision >= 0.85 on a fresh held-out set before CLAUDE_DEFERRAL_MODE=block"
+   }
+  },
   {
    "checkpoint": {
     "name": "deferral-v1",

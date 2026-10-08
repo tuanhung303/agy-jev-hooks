@@ -1,14 +1,18 @@
 """sage.deferral - Stop-time deferral checklist.
 
 A reply that hands an action back to the user ("want me to push?") is
-checked against fixed risk questions. The agent should have just done the
-action only when Jev clears every risk and no deterministic hard hold fires.
+checked with one ordered if/else tree plus four objective vetoes. The agent
+should have just done the action only when the tree lands on a continue
+branch, Jev clears every veto, and no deterministic hard hold fires.
 
 Order: a cheap regex prefilter on the reply tail decides whether to look at
 all; hard holds (user said wait, a named job is still running, an approval
 claim read from a file, a start-of-task confirmation, a message or a
 client-system target in the deferred sentence) force "hold"; Jev answers
-d_defer plus the x_* risk questions from the `deferral` case in jev.yaml.
+one `branch` choice question (the tree, as YAML text) plus the x_* vetoes
+from the `deferral` case in jev.yaml. Eight independent veto questions
+(v2) each misfired a little and together held most true continues; the
+tree takes the judgment calls, the vetoes keep only objective risks.
 
 The gates come from the marked block in the user's global rules file
 (GATES_SOURCE, default ~/.claude/CLAUDE.md), so the hook never keeps its own
@@ -33,8 +37,9 @@ DEFERRAL_CONFIG_PATH = Path(os.environ.get("AGY_DEFERRAL_CONFIG")
 TAIL_CHARS = 700
 MOVES_KEPT = 14
 REQUESTS_KEPT = 5
-RISKS = ("x_question", "x_gate", "x_external", "x_irreversible",
-         "x_unauthorized", "x_user_only", "x_guess", "x_costly")
+DEFERRAL_CASE = os.environ.get("AGY_DEFERRAL_CASE") or "deferral"
+BRANCH = "branch"
+RISKS = ("x_external", "x_irreversible", "x_guess", "x_costly")
 
 DEFER_RE = re.compile(
     r"(do you want me|want me to|should i\b|shall i\b|let me know if you want|tell me if you want"
@@ -172,10 +177,10 @@ def compact_moves(turn: List[Dict[str, Any]]) -> List[str]:
 
 
 def build_body(user_requests: List[str], moves: List[str], reply: str,
-               config: Dict[str, Any], date: str) -> Dict[str, Any]:
+               config: Dict[str, Any], date: str, case_name: Optional[str] = None) -> Dict[str, Any]:
     """Jev request with separated blocks: goal, policy, case, offer.
     Each question names the field it judges, so case text never reads as rules."""
-    case = load_case("deferral")
+    case = load_case(case_name or DEFERRAL_CASE)
     budgets = case["budgets"]
     requests = [str(r).strip() for r in user_requests if str(r).strip()][-REQUESTS_KEPT:]
     offer = " ".join(deferred_sentences(reply)) or str(reply or "")[-300:]
@@ -194,23 +199,41 @@ def build_body(user_requests: List[str], moves: List[str], reply: str,
         },
         "offer": _bound(offer, int(budgets["offer_chars"])),
     }
-    questions = {qid: {"type": spec["type"], "instructions": {"question": spec["instructions"], "judge": "offer"}}
-                 for qid, spec in case["questions"].items()}
+    questions = {}
+    for qid, spec in case["questions"].items():
+        if spec["type"] == "choice":
+            questions[qid] = {"type": "choice", "instructions": {"tree": spec["instructions"], "judge": "offer"},
+                              "criteria": dict(spec["criteria"])}
+        else:
+            questions[qid] = {"type": spec["type"], "instructions": {"question": spec["instructions"], "judge": "offer"}}
     body = {"state": state, "questions": questions, "providerOptions": {}}
     if len(json.dumps(body, ensure_ascii=False)) > int(budgets["request_char_cap"]):
         raise ValueError("deferral request over cap")
     return body
 
 
+def continue_probability(data: Any) -> Optional[tuple]:
+    """(chosen branch, summed probability of the continue branches) from the choice answer, or None."""
+    parse = load_case(DEFERRAL_CASE)["parse"]
+    answers = data.get("answers") if isinstance(data, dict) else None
+    answer = answers.get(BRANCH) if isinstance(answers, dict) else None
+    if not isinstance(answer, dict) or not isinstance(answer.get("probabilities"), dict):
+        return None
+    probs = answer["probabilities"]
+    total = sum(float(v) for k, v in probs.items() if k in parse["continue_branches"] and isinstance(v, (int, float)))
+    return answer.get("choice"), total
+
+
 def decide(probs: Dict[str, float], holds: List[str]) -> str:
-    parse = load_case("deferral")["parse"]
+    """probs: "continue" (summed continue-branch probability) plus each veto."""
+    parse = load_case(DEFERRAL_CASE)["parse"]
     if holds:
         return "hold"
-    if any(key not in probs for key in ("d_defer",) + RISKS):
+    if any(key not in probs for key in ("continue",) + RISKS):
         return "error"
-    if probs["d_defer"] <= float(parse["defer_floor"]):
+    if probs["continue"] <= float(parse["continue_floor"]):
         return "hold"
-    return "continue" if all(probs[k] < float(parse["risk_ceiling"]) for k in RISKS) else "hold"
+    return "continue" if all(probs[k] < float(parse["veto_ceiling"]) for k in RISKS) else "hold"
 
 
 def check_deferral(user_requests: List[str], turn: List[Dict[str, Any]], reply: str,
@@ -228,10 +251,13 @@ def check_deferral(user_requests: List[str], turn: List[Dict[str, Any]], reply: 
     try:
         body = build_body(user_requests, compact_moves(turn), reply, config,
                           time.strftime("%Y-%m-%d (%a)", time.localtime(now)))
-        budget = float(load_case("deferral")["budgets"]["timeout_s"])
+        budget = float(load_case(DEFERRAL_CASE)["budgets"]["timeout_s"])
         data = (call or _call_jev)(body["state"], body["questions"], attempt_timeout=budget,
                     deadline=deadline if deadline is not None else time.monotonic() + budget)
-        probs = parse_boolean_answers(data, ["d_defer", *RISKS])
+        probs = parse_boolean_answers(data, list(RISKS))
+        branch = continue_probability(data)
+        if branch is not None:
+            result["branch"], probs["continue"] = branch[0], branch[1]
         result["p"] = {k: round(v, 2) for k, v in probs.items()}
         result["verdict"] = decide(probs, result["hard"])
     except Exception as exc:  # fail open
@@ -243,6 +269,8 @@ def check_deferral(user_requests: List[str], turn: List[Dict[str, Any]], reply: 
 
 def steer_text(result: Dict[str, Any]) -> str:
     offer = result.get("offer") or "the action you offered"
-    return ("Deferral check: no gate, external write, irreversible step, open user decision or guess found for: "
-            f"\"{offer}\". Do it now, then report it in one line. If it is at a listed gate, name the gate in one "
+    criteria = load_case(DEFERRAL_CASE)["questions"][BRANCH]["criteria"]
+    why = criteria.get(result.get("branch") or "", "the action is a next step you can take")
+    return (f"Deferral check: \"{offer}\" reads as: {why}. No gate, external write, irreversible step or guess "
+            "was found. Do it now, then report it in one line. If it is at a listed gate, name the gate in one "
             "line instead.")

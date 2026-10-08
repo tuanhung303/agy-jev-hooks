@@ -1,4 +1,4 @@
-# Deferral check: checkpoints deferral-v1 and deferral-v2
+# Deferral check: checkpoints deferral-v1, v2 and v3
 
 ## What it does
 
@@ -17,9 +17,16 @@ Pipeline (`sage/deferral.py`, case `deferral` in `sage/jev/jev.yaml`):
    - `message`: the deferred sentence sends a message.
    - `client_system`: a client system named in the private config.
    - `weekday_publish`: a production publish on Monday to Friday.
-3. Jev answers `d_defer` plus 8 risk questions (`x_question`, `x_gate`, `x_external`, `x_irreversible`,
-   `x_unauthorized`, `x_user_only`, `x_guess`, `x_costly`). The verdict is `continue` only when
-   `d_defer > 0.5` and every risk is below 0.5.
+3. Jev answers one `branch` choice question and four boolean vetoes (`x_external`, `x_irreversible`,
+   `x_guess`, `x_costly`). The `branch` question carries an ordered if/else tree as YAML text. Jev walks it
+   top to bottom and names the first branch the offer reaches (for example `gate_message`, `user_decision`,
+   `finish_own`, `next_step`). The verdict is `continue` only when the continue branches (`finish_own`,
+   `next_step`, `plain_fix`, `cheap_read`) hold more than 0.5 of the probability and every veto is below 0.5.
+
+Why v3 changed shape: v1 and v2 asked 8 independent risk questions, and any one of them could hold the case.
+Each misfired a little, so on a fresh set they held 24 of 28 true continues. The judgment calls (was it a
+question, is it the user's decision, was it asked for) now sit in one ordered tree. The vetoes keep only
+the objective risks.
 
 Since deferral-v2 the gates are read from the block between `<!-- gates:start -->` and `<!-- gates:end -->`
 in `~/.claude/CLAUDE.md` (override with `AGY_GATES_SOURCE`). The rules file is the single source, and the
@@ -39,8 +46,10 @@ Private names (the client-system list) live in `~/.config/agy/deferral.json`, ne
 
 The numbers are in `baseline.json`.
 
-- Held-out set: 100 real cases with blind labels. The check scored precision 0.83 and recall 0.43, with 2 false continues out of 77 holds.
-- The block bar is precision 0.85 or higher on a fresh held-out set, so the check stays in shadow mode.
+- Fresh set (deferral-v3): 100 real cases from 32 sessions, blind labels, 28 expected continues. Two runs gave
+  precision 1.00 and 0.91, recall 0.36. v2 scored 0.67 / 0.14 on the same set.
+- The block bar (precision 0.85 or higher on a fresh set) is met on the point estimate, but only 10 or 11
+  continues back it. The check stays in shadow mode until live data agrees.
 
 ## Measuring the change later
 
