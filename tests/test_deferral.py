@@ -83,6 +83,32 @@ class DeferralUnitTests(unittest.TestCase):
                 raise TimeoutError("slow")
             self.assertEqual(D.check_deferral(["x"], turn, text, call=broken)["verdict"], "error")
 
+    def test_gates_come_from_the_marked_rules_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CLAUDE.md"
+            path.write_text("# Rules\n<!-- gates:start -->\nAsk first: gate X only.\n<!-- gates:end -->\nother\n",
+                            encoding="utf-8")
+            self.assertEqual(D.read_gates(path), "Ask first: gate X only.")
+            with mock.patch.object(D, "GATES_SOURCE", path):
+                body = D.build_body(["fix it", "commit when done"], ["Bash: pytest  => 3 passed"],
+                                    "Done, 3 tests pass. Want me to commit?", CONFIG, "2026-10-07 (Wed)")
+                self.assertEqual(D.rules_source(), "rules_file")
+            state = body["state"]
+            self.assertEqual(set(state), {"goal", "policy", "case", "offer"})
+            self.assertEqual(state["policy"]["rules"], "Ask first: gate X only.")
+            self.assertEqual(state["policy"]["client_owned_systems"], CONFIG["client_systems"])
+            self.assertEqual(state["offer"], "Want me to commit?")
+            self.assertEqual(state["case"]["earlier_requests"], ["fix it"])
+            self.assertEqual(state["case"]["latest_request"], "commit when done")
+            self.assertEqual(body["questions"]["x_gate"]["instructions"]["judge"], "offer")
+            path.write_text("# Rules without markers\n", encoding="utf-8")
+            self.assertIsNone(D.read_gates(path))
+            self.assertIsNone(D.read_gates(Path(tmp) / "missing.md"))
+        with mock.patch.object(D, "read_gates", return_value=None):
+            body = D.build_body(["x"], [], "Want me to push?", CONFIG, "2026-10-07 (Wed)")
+            self.assertIn("app.example.com Monday-Friday", body["state"]["policy"]["rules"])
+            self.assertEqual(D.rules_source(), "fallback")
+
     def test_moves_are_compact(self):
         turn = [{"type": "PLANNER_RESPONSE", "content": "Running tests",
                  "tool_calls": [{"name": "Bash", "args": {"command": "pytest -q"}}]},

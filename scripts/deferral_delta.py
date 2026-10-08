@@ -96,6 +96,8 @@ def main():
         "stops": len(rows),
         "deferral_checked": len(checked),
         "check_rate": round(len(checked) / len(rows), 3) if rows else None,
+        "by_check": dict(Counter(r["deferral"].get("check") for r in checked)),
+        "rules_source": dict(Counter(r["deferral"].get("rules") for r in checked)),
         "verdicts": dict(verdicts),
         "hard_holds": dict(holds),
         "latency_s": {"p50": statistics.median(lat) if lat else None, "p95": pct(lat, 0.95), "max": max(lat, default=None)},

@@ -1,4 +1,4 @@
-# Deferral check: checkpoint deferral-v1
+# Deferral check: checkpoints deferral-v1 and deferral-v2
 
 ## What it does
 
@@ -21,7 +21,13 @@ Pipeline (`sage/deferral.py`, case `deferral` in `sage/jev/jev.yaml`):
    `x_unauthorized`, `x_user_only`, `x_guess`, `x_costly`). The verdict is `continue` only when
    `d_defer > 0.5` and every risk is below 0.5.
 
-Private names (client systems, frontend host) live in `~/.config/agy/deferral.json`, never in the repo.
+Since deferral-v2 the gates are read from the block between `<!-- gates:start -->` and `<!-- gates:end -->`
+in `~/.claude/CLAUDE.md` (override with `AGY_GATES_SOURCE`). The rules file is the single source, and the
+hook keeps no copy. A built-in fallback applies only when the block is missing, and the record's `rules`
+field says which source was used. The request is split into `goal`, `policy`, `case` (list fields) and
+`offer` (the exact deferred action), and each question names the field it judges.
+
+Private names (the client-system list) live in `~/.config/agy/deferral.json`, never in the repo.
 
 ## Modes and switches
 
